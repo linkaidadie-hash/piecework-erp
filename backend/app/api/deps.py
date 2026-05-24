@@ -5,6 +5,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.license import require_valid_license
 from app.core.security import ALGORITHM
 from app.db import get_db
 from app.models import Tenant, User
@@ -15,6 +16,7 @@ def get_current_user(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> User:
+    require_valid_license()
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
     token = authorization.split(" ", 1)[1]
