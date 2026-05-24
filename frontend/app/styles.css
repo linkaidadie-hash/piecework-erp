@@ -34,6 +34,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .shell {
   min-height: 100vh;
 }
@@ -115,6 +120,64 @@ button {
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: 0 16px 40px rgba(23, 33, 27, 0.08);
+}
+
+.license-shell {
+  width: min(780px, 100%);
+}
+
+.license-panel {
+  width: 100%;
+}
+
+.license-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.license-status code {
+  display: block;
+  min-height: 82px;
+  margin-top: 6px;
+  padding: 12px;
+  overflow-wrap: anywhere;
+  color: var(--brand-dark);
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  line-height: 1.6;
+}
+
+.license-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.license-grid .span-3 {
+  grid-column: span 1;
+}
+
+.upload-license {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  color: white;
+  background: var(--brand);
+  border-radius: 7px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.upload-license input {
+  display: none;
 }
 
 .login-panel h1 {
@@ -331,6 +394,11 @@ th {
   color: var(--warn);
 }
 
+.success {
+  margin-top: 12px;
+  color: var(--brand-dark);
+}
+
 @media (max-width: 920px) {
   .topbar {
     align-items: flex-start;
@@ -351,6 +419,11 @@ th {
   }
 
   .form {
+    grid-template-columns: 1fr;
+  }
+
+  .license-status,
+  .license-grid {
     grid-template-columns: 1fr;
   }
 
