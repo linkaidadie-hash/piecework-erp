@@ -1,7 +1,7 @@
 {
   "name": "vps-109-199-122-37-p",
   "version": "1.0.0",
-  "description": "第一版已经包含登录、员工管理、岗位/工序、产品、原料库存、成品库存、工单录入、流程单打印、每日计件录入、工资统计、手机老板看板和 SaaS 授权校验骨架。",
+  "description": "中小企业生产、库存、工单和计件工资管理系统",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
