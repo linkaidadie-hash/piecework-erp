@@ -23,6 +23,9 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-piecework}:${POSTGRES_PASSWORD:-change-strong-password}@db:5432/${POSTGRES_DB:-piecework_erp}
       SECRET_KEY: ${SECRET_KEY:-change-a-long-random-secret}
       DEFAULT_DOMAIN: ${DOMAIN:-erp.hanshuniu.top}
+      LICENSE_FILE: /data/license.dat
+    volumes:
+      - license_data:/data
     depends_on:
       db:
         condition: service_healthy
@@ -40,3 +43,4 @@ services:
 
 volumes:
   postgres_data:
+  license_data:
