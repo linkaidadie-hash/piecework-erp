@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Boxes, ClipboardList, Factory, FileText, LogOut, Package, Printer, Save, Users } from "lucide-react";
-import { api, money, Session } from "@/lib/api";
+import { BarChart3, Boxes, ClipboardList, Copy, Factory, FileText, LogOut, Package, Printer, Save, ShieldCheck, Upload, Users } from "lucide-react";
+import { api, LicenseStatus, money, Session } from "@/lib/api";
 
 type Row = Record<string, any>;
 
@@ -15,6 +15,7 @@ const tabs = [
   ["finished", "成品", Package],
   ["orders", "工单", ClipboardList],
   ["piece", "计件", FileText],
+  ["license", "授权", ShieldCheck],
 ] as const;
 
 export default function Home() {
@@ -55,7 +56,7 @@ export default function Home() {
         <div className="brand">
           <div className="brand-mark"><Factory size={19} /></div>
           <div>
-            <div>计件生产管理系统</div>
+            <div>中小企业生产系统</div>
             <small>{session.company}</small>
           </div>
         </div>
@@ -80,6 +81,7 @@ export default function Home() {
         {active === "finished" && <Finished rows={data.finished as Row[]} products={data.products as Row[]} token={session.token} onDone={refresh} />}
         {active === "orders" && <Orders rows={data.orders as Row[]} products={data.products as Row[]} materials={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "piece" && <Piece entries={data.entries as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} token={session.token} onDone={refresh} />}
+        {active === "license" && <LicenseManager />}
       </main>
     </div>
   );
@@ -88,6 +90,15 @@ export default function Home() {
 function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   const [form, setForm] = useState({ company: "演示企业", username: "admin", password: "admin123456", auth_code: "DEMO-ERP-2026" });
   const [error, setError] = useState("");
+  const [license, setLicense] = useState<LicenseStatus | null>(null);
+
+  async function refreshLicense() {
+    setLicense(await api<LicenseStatus>("/license/status"));
+  }
+
+  useEffect(() => {
+    refreshLicense().catch((err) => setError(err.message));
+  }, []);
 
   async function submit() {
     setError("");
@@ -102,11 +113,22 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
     }
   }
 
+  if (!license || !license.valid) {
+    return (
+      <div className="login">
+        <div className="license-shell">
+          <LicenseManager initialStatus={license} onStatus={setLicense} />
+          {error && <p className="error">{error}</p>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="login">
       <div className="login-panel">
-        <h1>计件生产管理系统</h1>
-        <p className="hint">企业账号、授权码、设备绑定和到期停用已经接入。演示账号可直接登录。</p>
+        <h1>中小企业生产系统</h1>
+        <p className="hint">本机授权已通过。请输入企业账号登录系统。</p>
         <div className="form one">
           {[
             ["company", "企业名称"],
@@ -124,6 +146,70 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
         {error && <p className="error">{error}</p>}
       </div>
     </div>
+  );
+}
+
+function LicenseManager({ initialStatus, onStatus }: { initialStatus?: LicenseStatus | null; onStatus?: (status: LicenseStatus) => void }) {
+  const [status, setStatus] = useState<LicenseStatus | null>(initialStatus ?? null);
+  const [message, setMessage] = useState("");
+
+  async function refresh() {
+    const next = await api<LicenseStatus>("/license/status");
+    setStatus(next);
+    onStatus?.(next);
+  }
+
+  useEffect(() => {
+    if (!initialStatus) refresh().catch((err) => setMessage(err.message));
+  }, []);
+
+  async function importFile(file?: File) {
+    if (!file) return;
+    setMessage("");
+    try {
+      const licenseData = JSON.parse(await file.text());
+      const next = await api<LicenseStatus>("/license/import", { method: "POST", body: JSON.stringify(licenseData) });
+      setStatus(next);
+      onStatus?.(next);
+      setMessage(next.message);
+    } catch (err: any) {
+      setMessage(err.message || "授权文件导入失败");
+    }
+  }
+
+  async function copyMachineId() {
+    if (!status?.machineId) return;
+    await navigator.clipboard.writeText(status.machineId);
+    setMessage("机器码已复制");
+  }
+
+  return (
+    <section className="panel license-panel">
+      <div className="section-head">
+        <h2>授权管理</h2>
+        <span className={`status ${status?.valid ? "" : "danger"}`}>{status?.message || "读取授权状态"}</span>
+      </div>
+      <div className="license-status">
+        <div>
+          <label>本机机器码</label>
+          <code>{status?.machineId || "正在读取..."}</code>
+        </div>
+        <button className="secondary" onClick={copyMachineId} disabled={!status?.machineId} title="复制机器码"><Copy size={17} /> 复制</button>
+      </div>
+      {status?.license && (
+        <div className="license-grid">
+          <Metric label="客户名称" value={status.license.customerName || "-"} sub={status.license.licenseCode || "授权编号"} />
+          <Metric label="版本" value={status.license.edition || "-"} sub={`用户数 ${status.license.maxUsers || 1}`} />
+          <Metric label="有效期" value={status.license.expireAt || "-"} sub={`签发 ${status.license.issuedAt || "-"}`} />
+        </div>
+      )}
+      <label className="upload-license">
+        <Upload size={17} /> 导入 license.dat
+        <input type="file" accept=".dat,.json,application/json" onChange={(e) => importFile(e.target.files?.[0])} />
+      </label>
+      {message && <p className={status?.valid ? "success" : "error"}>{message}</p>}
+      <p className="hint">把本机机器码发给销售方，收到 license.dat 后在这里导入。客户软件不提供授权生成入口。</p>
+    </section>
   );
 }
 
