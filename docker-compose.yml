@@ -1,0 +1,51 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-piecework_erp}
+      POSTGRES_USER: ${POSTGRES_USER:-piecework}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-strong-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-piecework} -d ${POSTGRES_DB:-piecework_erp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-piecework}:${POSTGRES_PASSWORD:-change-strong-password}@db:5432/${POSTGRES_DB:-piecework_erp}
+      SECRET_KEY: ${SECRET_KEY:-change-a-long-random-secret}
+      DEFAULT_DOMAIN: ${DOMAIN:-erp.hanshuniu.top}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE: /api
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      DOMAIN: ${DOMAIN:-erp.hanshuniu.top}
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  postgres_data:
