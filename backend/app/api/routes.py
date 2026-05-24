@@ -33,6 +33,18 @@ def model_dict(obj, extra: dict | None = None):
     return data
 
 
+def ensure_non_negative_stock(current_stock: float, quantity: float, item_name: str):
+    if current_stock - quantity < 0:
+        raise HTTPException(status_code=400, detail=f"{item_name}库存不足")
+
+
+def get_tenant_product(db: Session, tenant_id: int, product_id: int) -> Product:
+    product = db.get(Product, product_id)
+    if not product or product.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="产品不存在")
+    return product
+
+
 @router.post("/bootstrap", response_model=BootstrapOut)
 def bootstrap(db: Session = Depends(get_db)):
     company = "演示企业"
@@ -163,6 +175,8 @@ def material_txn(payload: MaterialTxnIn, user: User = Depends(get_current_user),
     mat = db.get(Material, payload.material_id)
     if not mat or mat.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="原料不存在")
+    if payload.direction == "out":
+        ensure_non_negative_stock(mat.stock, payload.quantity, mat.name)
     mat.stock += payload.quantity if payload.direction == "in" else -payload.quantity
     db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="material", item_id=mat.id, direction=payload.direction, quantity=payload.quantity, reason=payload.reason))
     db.commit()
@@ -179,11 +193,14 @@ def list_finished_goods(user: User = Depends(get_current_user), db: Session = De
 
 @router.post("/finished-goods/txn")
 def finished_txn(payload: FinishedTxnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    get_tenant_product(db, user.tenant_id, payload.product_id)
     fg = db.scalar(select(FinishedGood).where(FinishedGood.tenant_id == user.tenant_id, FinishedGood.product_id == payload.product_id))
     if not fg:
         fg = FinishedGood(tenant_id=user.tenant_id, product_id=payload.product_id, stock=0)
         db.add(fg)
         db.flush()
+    if payload.direction == "out":
+        ensure_non_negative_stock(fg.stock, payload.quantity, "成品")
     fg.stock += payload.quantity if payload.direction == "in" else -payload.quantity
     db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="finished", item_id=payload.product_id, direction=payload.direction, quantity=payload.quantity, reason=payload.reason))
     db.commit()
@@ -198,14 +215,20 @@ def list_work_orders(user: User = Depends(get_current_user), db: Session = Depen
 
 @router.post("/work-orders")
 def create_work_order(payload: WorkOrderIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    get_tenant_product(db, user.tenant_id, payload.product_id)
+    if db.scalar(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.order_no == payload.order_no)):
+        raise HTTPException(status_code=400, detail="工单号已存在")
     data = payload.model_dump()
     materials = data.pop("materials")
     flow = data.pop("flow")
     for item in materials:
         mat = db.get(Material, int(item["material_id"]))
         qty = float(item["quantity"])
+        if qty <= 0:
+            raise HTTPException(status_code=400, detail="扣料数量必须大于 0")
         if not mat or mat.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="原料不存在")
+        ensure_non_negative_stock(mat.stock, qty, mat.name)
         mat.stock -= qty
         db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="material", item_id=mat.id, direction="out", quantity=qty, reason=f"工单 {payload.order_no} 开始扣料"))
     obj = WorkOrder(tenant_id=user.tenant_id, **data, flow=json.dumps(flow, ensure_ascii=False), materials=json.dumps(materials, ensure_ascii=False))
@@ -236,12 +259,22 @@ def create_piece_entry(payload: PieceEntryIn, user: User = Depends(get_current_u
     if not order or not emp or emp.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="工单或员工不存在")
     flow = json.loads(order.flow or "[]")
-    unit_price = next((float(x.get("price", 0)) for x in flow if x.get("name") == payload.process_name), emp.piece_rate)
+    process = next((x for x in flow if x.get("name") == payload.process_name), None)
+    if flow and not process:
+        raise HTTPException(status_code=400, detail="工序不在当前工单流程中")
+    unit_price = float(process.get("price", 0)) if process else emp.piece_rate
     wage = payload.quantity * unit_price
     obj = PieceEntry(tenant_id=user.tenant_id, work_order_id=order.id, process_name=payload.process_name, employee_id=emp.id, quantity=payload.quantity, unit_price=unit_price, wage=wage, entry_date=payload.entry_date)
     is_final_process = bool(flow) and payload.process_name == flow[-1].get("name")
     if is_final_process:
-        order.completed_quantity = min(order.quantity, order.completed_quantity + payload.quantity)
+        remaining_quantity = order.quantity - order.completed_quantity
+        if remaining_quantity <= 0:
+            raise HTTPException(status_code=400, detail="工单已完工，不能继续录入末工序")
+        if payload.quantity > remaining_quantity:
+            raise HTTPException(status_code=400, detail=f"录入数量不能超过剩余数量 {remaining_quantity:g}")
+        order.completed_quantity += payload.quantity
+        if order.completed_quantity >= order.quantity:
+            order.status = "已完成"
         fg = db.scalar(select(FinishedGood).where(FinishedGood.tenant_id == user.tenant_id, FinishedGood.product_id == order.product_id))
         if not fg:
             fg = FinishedGood(tenant_id=user.tenant_id, product_id=order.product_id, stock=0)
