@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
+from app.core.license import license_status, require_valid_license, verify_license_data, write_license
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db import get_db
 from app.models import Employee, FinishedGood, InventoryTxn, Material, PieceEntry, Process, Product, Role, Tenant, User, WorkOrder
@@ -47,6 +48,7 @@ def get_tenant_product(db: Session, tenant_id: int, product_id: int) -> Product:
 
 @router.post("/bootstrap", response_model=BootstrapOut)
 def bootstrap(db: Session = Depends(get_db)):
+    require_valid_license()
     company = "演示企业"
     username = "admin"
     password = "admin123456"
@@ -87,6 +89,7 @@ def bootstrap(db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenOut)
 def login(payload: LoginIn, db: Session = Depends(get_db)):
+    require_valid_license()
     tenant = db.scalar(select(Tenant).where(Tenant.name == payload.company, Tenant.auth_code == payload.auth_code))
     if not tenant:
         raise HTTPException(status_code=401, detail="企业或授权码错误")
@@ -100,6 +103,20 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
         db.commit()
     token = create_access_token(str(user.id), {"tenant_id": tenant.id, "role": user.role.value})
     return TokenOut(access_token=token, role=user.role.value, company=tenant.name)
+
+
+@router.get("/license/status")
+def get_license_status():
+    return license_status()
+
+
+@router.post("/license/import")
+def import_license(payload: dict):
+    valid, message = verify_license_data(payload)
+    if not valid:
+        raise HTTPException(status_code=400, detail=message)
+    write_license(payload)
+    return license_status()
 
 
 @router.get("/me")
