@@ -2,8 +2,8 @@ import "./styles.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "计件生产管理系统",
-  description: "生产工单、库存、计件工资和老板看板",
+  title: "中小企业生产系统",
+  description: "中小企业生产、库存、工单和计件工资管理",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
