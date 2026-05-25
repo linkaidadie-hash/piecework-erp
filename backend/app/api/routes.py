@@ -2,11 +2,12 @@ import json
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
+from app.core.license import license_status, require_valid_license, verify_license_data, write_license
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db import get_db
 from app.models import Employee, FinishedGood, InventoryTxn, Material, PieceEntry, Process, Product, Role, Tenant, User, WorkOrder
@@ -19,6 +20,7 @@ from app.schemas import (
     MaterialTxnIn,
     PieceEntryIn,
     ProcessIn,
+    ProcessReorderIn,
     ProductIn,
     TokenOut,
     WorkOrderIn,
@@ -33,8 +35,29 @@ def model_dict(obj, extra: dict | None = None):
     return data
 
 
+def ensure_sort_order_column(db: Session):
+    if db.bind and db.bind.dialect.name == "sqlite":
+        columns = [row[1] for row in db.execute(text("PRAGMA table_info(processes)")).all()]
+        if "sort_order" not in columns:
+            db.execute(text("ALTER TABLE processes ADD COLUMN sort_order INTEGER DEFAULT 0"))
+            db.commit()
+
+
+def ensure_non_negative_stock(current_stock: float, quantity: float, item_name: str):
+    if current_stock - quantity < 0:
+        raise HTTPException(status_code=400, detail=f"{item_name}库存不足")
+
+
+def get_tenant_product(db: Session, tenant_id: int, product_id: int) -> Product:
+    product = db.get(Product, product_id)
+    if not product or product.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="产品不存在")
+    return product
+
+
 @router.post("/bootstrap", response_model=BootstrapOut)
 def bootstrap(db: Session = Depends(get_db)):
+    require_valid_license()
     company = "演示企业"
     username = "admin"
     password = "admin123456"
@@ -52,9 +75,9 @@ def bootstrap(db: Session = Depends(get_db)):
         db.add(User(tenant_id=tenant.id, username=username, password_hash=hash_password(password), role=Role.admin))
         db.add_all(
             [
-                Process(tenant_id=tenant.id, name="裁剪", default_price=0.08),
-                Process(tenant_id=tenant.id, name="车缝", default_price=0.18),
-                Process(tenant_id=tenant.id, name="包装", default_price=0.05),
+                Process(tenant_id=tenant.id, name="裁剪", default_price=0.08, sort_order=10),
+                Process(tenant_id=tenant.id, name="车缝", default_price=0.18, sort_order=20),
+                Process(tenant_id=tenant.id, name="包装", default_price=0.05, sort_order=30),
                 Employee(tenant_id=tenant.id, name="张三", employee_no="E001", position="车缝", piece_rate=0.18),
                 Material(tenant_id=tenant.id, name="面料", unit="米", stock=500, min_stock=100),
                 Material(tenant_id=tenant.id, name="纽扣", unit="颗", stock=3000, min_stock=500),
@@ -75,6 +98,7 @@ def bootstrap(db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenOut)
 def login(payload: LoginIn, db: Session = Depends(get_db)):
+    require_valid_license()
     tenant = db.scalar(select(Tenant).where(Tenant.name == payload.company, Tenant.auth_code == payload.auth_code))
     if not tenant:
         raise HTTPException(status_code=401, detail="企业或授权码错误")
@@ -88,6 +112,20 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
         db.commit()
     token = create_access_token(str(user.id), {"tenant_id": tenant.id, "role": user.role.value})
     return TokenOut(access_token=token, role=user.role.value, company=tenant.name)
+
+
+@router.get("/license/status")
+def get_license_status():
+    return license_status()
+
+
+@router.post("/license/import")
+def import_license(payload: dict):
+    valid, message = verify_license_data(payload)
+    if not valid:
+        raise HTTPException(status_code=400, detail=message)
+    write_license(payload)
+    return license_status()
 
 
 @router.get("/me")
@@ -112,16 +150,44 @@ def create_employee(payload: EmployeeIn, user: User = Depends(require_admin), db
 
 @router.get("/processes")
 def list_processes(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [model_dict(x) for x in db.scalars(select(Process).where(Process.tenant_id == user.tenant_id)).all()]
+    ensure_sort_order_column(db)
+    processes = db.scalars(select(Process).where(Process.tenant_id == user.tenant_id).order_by(Process.sort_order, Process.id)).all()
+    changed = False
+    for index, process in enumerate(processes, start=1):
+        if not process.sort_order:
+            process.sort_order = index * 10
+            changed = True
+    if changed:
+        db.commit()
+    return [model_dict(x) for x in processes]
 
 
 @router.post("/processes")
 def create_process(payload: ProcessIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    obj = Process(tenant_id=user.tenant_id, **payload.model_dump())
+    ensure_sort_order_column(db)
+    data = payload.model_dump()
+    if data.get("sort_order") is None:
+        max_order = db.scalar(select(func.max(Process.sort_order)).where(Process.tenant_id == user.tenant_id)) or 0
+        data["sort_order"] = max_order + 10
+    obj = Process(tenant_id=user.tenant_id, **data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
     return model_dict(obj)
+
+
+@router.post("/processes/reorder")
+def reorder_processes(payload: ProcessReorderIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    ensure_sort_order_column(db)
+    processes = db.scalars(select(Process).where(Process.tenant_id == user.tenant_id)).all()
+    by_id = {process.id: process for process in processes}
+    if set(payload.process_ids) != set(by_id):
+        raise HTTPException(status_code=400, detail="工序排序数据不完整")
+    for index, process_id in enumerate(payload.process_ids, start=1):
+        by_id[process_id].sort_order = index * 10
+    db.commit()
+    ordered = sorted(processes, key=lambda item: (item.sort_order, item.id))
+    return [model_dict(x) for x in ordered]
 
 
 @router.get("/products")
@@ -163,6 +229,8 @@ def material_txn(payload: MaterialTxnIn, user: User = Depends(get_current_user),
     mat = db.get(Material, payload.material_id)
     if not mat or mat.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="原料不存在")
+    if payload.direction == "out":
+        ensure_non_negative_stock(mat.stock, payload.quantity, mat.name)
     mat.stock += payload.quantity if payload.direction == "in" else -payload.quantity
     db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="material", item_id=mat.id, direction=payload.direction, quantity=payload.quantity, reason=payload.reason))
     db.commit()
@@ -179,11 +247,14 @@ def list_finished_goods(user: User = Depends(get_current_user), db: Session = De
 
 @router.post("/finished-goods/txn")
 def finished_txn(payload: FinishedTxnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    get_tenant_product(db, user.tenant_id, payload.product_id)
     fg = db.scalar(select(FinishedGood).where(FinishedGood.tenant_id == user.tenant_id, FinishedGood.product_id == payload.product_id))
     if not fg:
         fg = FinishedGood(tenant_id=user.tenant_id, product_id=payload.product_id, stock=0)
         db.add(fg)
         db.flush()
+    if payload.direction == "out":
+        ensure_non_negative_stock(fg.stock, payload.quantity, "成品")
     fg.stock += payload.quantity if payload.direction == "in" else -payload.quantity
     db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="finished", item_id=payload.product_id, direction=payload.direction, quantity=payload.quantity, reason=payload.reason))
     db.commit()
@@ -198,14 +269,20 @@ def list_work_orders(user: User = Depends(get_current_user), db: Session = Depen
 
 @router.post("/work-orders")
 def create_work_order(payload: WorkOrderIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    get_tenant_product(db, user.tenant_id, payload.product_id)
+    if db.scalar(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.order_no == payload.order_no)):
+        raise HTTPException(status_code=400, detail="工单号已存在")
     data = payload.model_dump()
     materials = data.pop("materials")
     flow = data.pop("flow")
     for item in materials:
         mat = db.get(Material, int(item["material_id"]))
         qty = float(item["quantity"])
+        if qty <= 0:
+            raise HTTPException(status_code=400, detail="扣料数量必须大于 0")
         if not mat or mat.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="原料不存在")
+        ensure_non_negative_stock(mat.stock, qty, mat.name)
         mat.stock -= qty
         db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="material", item_id=mat.id, direction="out", quantity=qty, reason=f"工单 {payload.order_no} 开始扣料"))
     obj = WorkOrder(tenant_id=user.tenant_id, **data, flow=json.dumps(flow, ensure_ascii=False), materials=json.dumps(materials, ensure_ascii=False))
@@ -236,12 +313,22 @@ def create_piece_entry(payload: PieceEntryIn, user: User = Depends(get_current_u
     if not order or not emp or emp.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="工单或员工不存在")
     flow = json.loads(order.flow or "[]")
-    unit_price = next((float(x.get("price", 0)) for x in flow if x.get("name") == payload.process_name), emp.piece_rate)
+    process = next((x for x in flow if x.get("name") == payload.process_name), None)
+    if flow and not process:
+        raise HTTPException(status_code=400, detail="工序不在当前工单流程中")
+    unit_price = float(process.get("price", 0)) if process else emp.piece_rate
     wage = payload.quantity * unit_price
     obj = PieceEntry(tenant_id=user.tenant_id, work_order_id=order.id, process_name=payload.process_name, employee_id=emp.id, quantity=payload.quantity, unit_price=unit_price, wage=wage, entry_date=payload.entry_date)
     is_final_process = bool(flow) and payload.process_name == flow[-1].get("name")
     if is_final_process:
-        order.completed_quantity = min(order.quantity, order.completed_quantity + payload.quantity)
+        remaining_quantity = order.quantity - order.completed_quantity
+        if remaining_quantity <= 0:
+            raise HTTPException(status_code=400, detail="工单已完工，不能继续录入末工序")
+        if payload.quantity > remaining_quantity:
+            raise HTTPException(status_code=400, detail=f"录入数量不能超过剩余数量 {remaining_quantity:g}")
+        order.completed_quantity += payload.quantity
+        if order.completed_quantity >= order.quantity:
+            order.status = "已完成"
         fg = db.scalar(select(FinishedGood).where(FinishedGood.tenant_id == user.tenant_id, FinishedGood.product_id == order.product_id))
         if not fg:
             fg = FinishedGood(tenant_id=user.tenant_id, product_id=order.product_id, stock=0)

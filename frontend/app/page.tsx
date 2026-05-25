@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Boxes, ClipboardList, Factory, FileText, LogOut, Package, Printer, Save, Users } from "lucide-react";
-import { api, money, Session } from "@/lib/api";
+import { ArrowDown, ArrowUp, BarChart3, Boxes, ClipboardList, Copy, Factory, FileText, LogOut, Package, Printer, Save, ShieldCheck, Upload, Users } from "lucide-react";
+import { api, LicenseStatus, money, Session } from "@/lib/api";
 
 type Row = Record<string, any>;
 
@@ -15,6 +15,7 @@ const tabs = [
   ["finished", "成品", Package],
   ["orders", "工单", ClipboardList],
   ["piece", "计件", FileText],
+  ["license", "授权", ShieldCheck],
 ] as const;
 
 export default function Home() {
@@ -55,7 +56,7 @@ export default function Home() {
         <div className="brand">
           <div className="brand-mark"><Factory size={19} /></div>
           <div>
-            <div>计件生产管理系统</div>
+            <div>中小企业生产系统</div>
             <small>{session.company}</small>
           </div>
         </div>
@@ -74,12 +75,13 @@ export default function Home() {
         {error && <p className="error">{error}</p>}
         {active === "dashboard" && <Dashboard dashboard={data.dashboard as Row} />}
         {active === "employees" && <Crud title="员工管理" rows={data.employees as Row[]} token={session.token} path="/employees" fields={[["name", "姓名"], ["employee_no", "工号"], ["position", "岗位/工序"], ["piece_rate", "计件单价", "number"]]} onDone={refresh} />}
-        {active === "processes" && <Crud title="岗位/工序管理" rows={data.processes as Row[]} token={session.token} path="/processes" fields={[["name", "工序名称"], ["default_price", "默认单价", "number"]]} onDone={refresh} />}
+        {active === "processes" && <Processes rows={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "products" && <Products rows={data.products as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "materials" && <Materials rows={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "finished" && <Finished rows={data.finished as Row[]} products={data.products as Row[]} token={session.token} onDone={refresh} />}
         {active === "orders" && <Orders rows={data.orders as Row[]} products={data.products as Row[]} materials={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "piece" && <Piece entries={data.entries as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} token={session.token} onDone={refresh} />}
+        {active === "license" && <LicenseManager />}
       </main>
     </div>
   );
@@ -88,6 +90,15 @@ export default function Home() {
 function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   const [form, setForm] = useState({ company: "演示企业", username: "admin", password: "admin123456", auth_code: "DEMO-ERP-2026" });
   const [error, setError] = useState("");
+  const [license, setLicense] = useState<LicenseStatus | null>(null);
+
+  async function refreshLicense() {
+    setLicense(await api<LicenseStatus>("/license/status"));
+  }
+
+  useEffect(() => {
+    refreshLicense().catch((err) => setError(err.message));
+  }, []);
 
   async function submit() {
     setError("");
@@ -102,11 +113,22 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
     }
   }
 
+  if (!license || !license.valid) {
+    return (
+      <div className="login">
+        <div className="license-shell">
+          <LicenseManager initialStatus={license} onStatus={setLicense} />
+          {error && <p className="error">{error}</p>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="login">
       <div className="login-panel">
-        <h1>计件生产管理系统</h1>
-        <p className="hint">企业账号、授权码、设备绑定和到期停用已经接入。演示账号可直接登录。</p>
+        <h1>中小企业生产系统</h1>
+        <p className="hint">本机授权已通过。请输入企业账号登录系统。</p>
         <div className="form one">
           {[
             ["company", "企业名称"],
@@ -124,6 +146,70 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
         {error && <p className="error">{error}</p>}
       </div>
     </div>
+  );
+}
+
+function LicenseManager({ initialStatus, onStatus }: { initialStatus?: LicenseStatus | null; onStatus?: (status: LicenseStatus) => void }) {
+  const [status, setStatus] = useState<LicenseStatus | null>(initialStatus ?? null);
+  const [message, setMessage] = useState("");
+
+  async function refresh() {
+    const next = await api<LicenseStatus>("/license/status");
+    setStatus(next);
+    onStatus?.(next);
+  }
+
+  useEffect(() => {
+    if (!initialStatus) refresh().catch((err) => setMessage(err.message));
+  }, []);
+
+  async function importFile(file?: File) {
+    if (!file) return;
+    setMessage("");
+    try {
+      const licenseData = JSON.parse(await file.text());
+      const next = await api<LicenseStatus>("/license/import", { method: "POST", body: JSON.stringify(licenseData) });
+      setStatus(next);
+      onStatus?.(next);
+      setMessage(next.message);
+    } catch (err: any) {
+      setMessage(err.message || "授权文件导入失败");
+    }
+  }
+
+  async function copyMachineId() {
+    if (!status?.machineId) return;
+    await navigator.clipboard.writeText(status.machineId);
+    setMessage("机器码已复制");
+  }
+
+  return (
+    <section className="panel license-panel">
+      <div className="section-head">
+        <h2>授权管理</h2>
+        <span className={`status ${status?.valid ? "" : "danger"}`}>{status?.message || "读取授权状态"}</span>
+      </div>
+      <div className="license-status">
+        <div>
+          <label>本机机器码</label>
+          <code>{status?.machineId || "正在读取..."}</code>
+        </div>
+        <button className="secondary" onClick={copyMachineId} disabled={!status?.machineId} title="复制机器码"><Copy size={17} /> 复制</button>
+      </div>
+      {status?.license && (
+        <div className="license-grid">
+          <Metric label="客户名称" value={status.license.customerName || "-"} sub={status.license.licenseCode || "授权编号"} />
+          <Metric label="版本" value={status.license.edition || "-"} sub={`用户数 ${status.license.maxUsers || 1}`} />
+          <Metric label="有效期" value={status.license.expireAt || "-"} sub={`签发 ${status.license.issuedAt || "-"}`} />
+        </div>
+      )}
+      <label className="upload-license">
+        <Upload size={17} /> 导入 license.dat
+        <input type="file" accept=".dat,.json,application/json" onChange={(e) => importFile(e.target.files?.[0])} />
+      </label>
+      {message && <p className={status?.valid ? "success" : "error"}>{message}</p>}
+      <p className="hint">把本机机器码发给销售方，收到 license.dat 后在这里导入。客户软件不提供授权生成入口。</p>
+    </section>
   );
 }
 
@@ -179,6 +265,61 @@ function Crud({ title, rows = [], token, path, fields, onDone }: { title: string
         <div className="form one">{fields.map(([key, label, type]) => <Input key={key} label={label} type={type} value={form[key]} onChange={(v) => setForm({ ...form, [key]: type === "number" ? Number(v) : v })} />)}<button className="primary" onClick={submit}><Save size={17} /> 保存</button></div>
       </section>
       <Table title="列表" rows={rows} cols={fields.map(([key, label]) => [key, label])} span="span-8" />
+    </div>
+  );
+}
+
+function Processes({ rows = [], token, onDone }: { rows?: Row[]; token: string; onDone: () => void }) {
+  const [form, setForm] = useState({ name: "", default_price: 0 });
+
+  async function submit() {
+    await api("/processes", { method: "POST", body: JSON.stringify(form) }, token);
+    setForm({ name: "", default_price: 0 });
+    onDone();
+  }
+
+  async function move(index: number, offset: number) {
+    const next = [...rows];
+    const target = index + offset;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    await api("/processes/reorder", { method: "POST", body: JSON.stringify({ process_ids: next.map((row) => row.id) }) }, token);
+    onDone();
+  }
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>岗位/工序管理</h2></div>
+        <div className="form one">
+          <Input label="工序名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
+          <Input label="默认单价" type="number" value={form.default_price} onChange={(v) => setForm({ ...form, default_price: Number(v) })} />
+          <button className="primary" onClick={submit}><Save size={17} /> 保存</button>
+        </div>
+      </section>
+      <section className="panel span-8">
+        <div className="section-head"><h2>工序顺序</h2><span className="status">影响新产品默认流程</span></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>顺序</th><th>工序名称</th><th>默认单价</th><th>位置</th></tr></thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={row.id}>
+                  <td>{index + 1}</td>
+                  <td>{row.name}</td>
+                  <td>{money(row.default_price)}</td>
+                  <td>
+                    <div className="row-actions">
+                      <button className="icon-button" onClick={() => move(index, -1)} disabled={index === 0} title="上移"><ArrowUp size={16} /></button>
+                      <button className="icon-button" onClick={() => move(index, 1)} disabled={index === rows.length - 1} title="下移"><ArrowDown size={16} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 }

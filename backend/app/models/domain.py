@@ -62,6 +62,7 @@ class Process(Base):
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
     name: Mapped[str] = mapped_column(String(80))
     default_price: Mapped[float] = mapped_column(Float, default=0)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Product(Base):
@@ -94,6 +95,8 @@ class FinishedGood(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     stock: Mapped[float] = mapped_column(Float, default=0)
 
+    __table_args__ = (UniqueConstraint("tenant_id", "product_id"),)
+
 
 class InventoryTxn(Base):
     __tablename__ = "inventory_txns"
@@ -123,6 +126,8 @@ class WorkOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     product: Mapped[Product] = relationship()
+
+    __table_args__ = (UniqueConstraint("tenant_id", "order_no"),)
 
 
 class PieceEntry(Base):
