@@ -6,7 +6,7 @@ from app.db import Base, engine
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="计件生产管理系统 API")
+app = FastAPI(title="中小企业生产系统 API")
 
 app.add_middleware(
     CORSMiddleware,
