@@ -1,10 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Boxes, ClipboardList, Factory, FileText, LogOut, Package, Printer, Save, Users } from "lucide-react";
-import { api, money, Session } from "@/lib/api";
+import { ArrowDown, ArrowUp, BarChart3, Boxes, ClipboardList, Copy, Factory, FileText, LogOut, Package, Pencil, Printer, Save, ShieldCheck, Upload, Users, X } from "lucide-react";
+import { api, LicenseStatus, money, Session } from "@/lib/api";
 
 type Row = Record<string, any>;
+
+function nextOrderNo() {
+  const now = new Date();
+  const date = now.toISOString().slice(2, 10).replace(/-/g, "");
+  const time = now.toTimeString().slice(0, 8).replace(/:/g, "");
+  return `WO-${date}-${time}`;
+}
 
 const tabs = [
   ["dashboard", "看板", BarChart3],
@@ -15,6 +22,7 @@ const tabs = [
   ["finished", "成品", Package],
   ["orders", "工单", ClipboardList],
   ["piece", "计件", FileText],
+  ["license", "授权", ShieldCheck],
 ] as const;
 
 export default function Home() {
@@ -55,7 +63,7 @@ export default function Home() {
         <div className="brand">
           <div className="brand-mark"><Factory size={19} /></div>
           <div>
-            <div>计件生产管理系统</div>
+            <div>中小企业生产系统</div>
             <small>{session.company}</small>
           </div>
         </div>
@@ -73,13 +81,14 @@ export default function Home() {
       <main className="main">
         {error && <p className="error">{error}</p>}
         {active === "dashboard" && <Dashboard dashboard={data.dashboard as Row} />}
-        {active === "employees" && <Crud title="员工管理" rows={data.employees as Row[]} token={session.token} path="/employees" fields={[["name", "姓名"], ["employee_no", "工号"], ["position", "岗位/工序"], ["piece_rate", "计件单价", "number"]]} onDone={refresh} />}
-        {active === "processes" && <Crud title="岗位/工序管理" rows={data.processes as Row[]} token={session.token} path="/processes" fields={[["name", "工序名称"], ["default_price", "默认单价", "number"]]} onDone={refresh} />}
+        {active === "employees" && <Employees rows={data.employees as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
+        {active === "processes" && <Processes rows={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "products" && <Products rows={data.products as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "materials" && <Materials rows={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "finished" && <Finished rows={data.finished as Row[]} products={data.products as Row[]} token={session.token} onDone={refresh} />}
         {active === "orders" && <Orders rows={data.orders as Row[]} products={data.products as Row[]} materials={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "piece" && <Piece entries={data.entries as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} token={session.token} onDone={refresh} />}
+        {active === "license" && <LicenseManager />}
       </main>
     </div>
   );
@@ -88,6 +97,15 @@ export default function Home() {
 function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   const [form, setForm] = useState({ company: "演示企业", username: "admin", password: "admin123456", auth_code: "DEMO-ERP-2026" });
   const [error, setError] = useState("");
+  const [license, setLicense] = useState<LicenseStatus | null>(null);
+
+  async function refreshLicense() {
+    setLicense(await api<LicenseStatus>("/license/status"));
+  }
+
+  useEffect(() => {
+    refreshLicense().catch((err) => setError(err.message));
+  }, []);
 
   async function submit() {
     setError("");
@@ -102,11 +120,22 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
     }
   }
 
+  if (!license || !license.valid) {
+    return (
+      <div className="login">
+        <div className="license-shell">
+          <LicenseManager initialStatus={license} onStatus={setLicense} />
+          {error && <p className="error">{error}</p>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="login">
       <div className="login-panel">
-        <h1>计件生产管理系统</h1>
-        <p className="hint">企业账号、授权码、设备绑定和到期停用已经接入。演示账号可直接登录。</p>
+        <h1>中小企业生产系统</h1>
+        <p className="hint">本机授权已通过。请输入企业账号登录系统。</p>
         <div className="form one">
           {[
             ["company", "企业名称"],
@@ -124,6 +153,70 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
         {error && <p className="error">{error}</p>}
       </div>
     </div>
+  );
+}
+
+function LicenseManager({ initialStatus, onStatus }: { initialStatus?: LicenseStatus | null; onStatus?: (status: LicenseStatus) => void }) {
+  const [status, setStatus] = useState<LicenseStatus | null>(initialStatus ?? null);
+  const [message, setMessage] = useState("");
+
+  async function refresh() {
+    const next = await api<LicenseStatus>("/license/status");
+    setStatus(next);
+    onStatus?.(next);
+  }
+
+  useEffect(() => {
+    if (!initialStatus) refresh().catch((err) => setMessage(err.message));
+  }, []);
+
+  async function importFile(file?: File) {
+    if (!file) return;
+    setMessage("");
+    try {
+      const licenseData = JSON.parse(await file.text());
+      const next = await api<LicenseStatus>("/license/import", { method: "POST", body: JSON.stringify(licenseData) });
+      setStatus(next);
+      onStatus?.(next);
+      setMessage(next.message);
+    } catch (err: any) {
+      setMessage(err.message || "授权文件导入失败");
+    }
+  }
+
+  async function copyMachineId() {
+    if (!status?.machineId) return;
+    await navigator.clipboard.writeText(status.machineId);
+    setMessage("机器码已复制");
+  }
+
+  return (
+    <section className="panel license-panel">
+      <div className="section-head">
+        <h2>授权管理</h2>
+        <span className={`status ${status?.valid ? "" : "danger"}`}>{status?.message || "读取授权状态"}</span>
+      </div>
+      <div className="license-status">
+        <div>
+          <label>本机机器码</label>
+          <code>{status?.machineId || "正在读取..."}</code>
+        </div>
+        <button className="secondary" onClick={copyMachineId} disabled={!status?.machineId} title="复制机器码"><Copy size={17} /> 复制</button>
+      </div>
+      {status?.license && (
+        <div className="license-grid">
+          <Metric label="客户名称" value={status.license.customerName || "-"} sub={status.license.licenseCode || "授权编号"} />
+          <Metric label="版本" value={status.license.edition || "-"} sub={`用户数 ${status.license.maxUsers || 1}`} />
+          <Metric label="有效期" value={status.license.expireAt || "-"} sub={`签发 ${status.license.issuedAt || "-"}`} />
+        </div>
+      )}
+      <label className="upload-license">
+        <Upload size={17} /> 导入 license.dat
+        <input type="file" accept=".dat,.json,application/json" onChange={(e) => importFile(e.target.files?.[0])} />
+      </label>
+      {message && <p className={status?.valid ? "success" : "error"}>{message}</p>}
+      <p className="hint">把本机机器码发给销售方，收到 license.dat 后在这里导入。客户软件不提供授权生成入口。</p>
+    </section>
   );
 }
 
@@ -183,6 +276,151 @@ function Crud({ title, rows = [], token, path, fields, onDone }: { title: string
   );
 }
 
+function Employees({ rows = [], processes = [], token, onDone }: { rows?: Row[]; processes?: Row[]; token: string; onDone: () => void }) {
+  const empty = { name: "", employee_no: "", position: "", piece_rate: 0, active: true };
+  const [form, setForm] = useState<Row>(empty);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const processOptions = processes.map((process) => [process.name, `${process.name} / ${money(process.default_price)}`]);
+
+  function applyPosition(position: string) {
+    const process = processes.find((item) => item.name === position);
+    setForm({ ...form, position, piece_rate: Number(process?.default_price ?? form.piece_rate ?? 0) });
+  }
+
+  function edit(row: Row) {
+    setEditingId(Number(row.id));
+    setForm({
+      name: row.name || "",
+      employee_no: row.employee_no || "",
+      position: row.position || "",
+      piece_rate: Number(row.piece_rate || 0),
+      active: row.active ?? true,
+    });
+  }
+
+  function reset() {
+    setEditingId(null);
+    setForm(empty);
+  }
+
+  async function submit() {
+    const method = editingId ? "PUT" : "POST";
+    const path = editingId ? `/employees/${editingId}` : "/employees";
+    await api(path, { method, body: JSON.stringify({ ...form, piece_rate: Number(form.piece_rate || 0), active: Boolean(form.active) }) }, token);
+    reset();
+    onDone();
+  }
+
+  const cols = [["name", "姓名"], ["employee_no", "工号"], ["position", "岗位/工序"], ["piece_rate", "计件单价"], ["active", "启用"]];
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>{editingId ? "修改员工" : "员工管理"}</h2></div>
+        <div className="form one">
+          <Input label="姓名" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
+          <Input label="工号" value={form.employee_no} onChange={(v) => setForm({ ...form, employee_no: v })} />
+          <Select label="岗位/工序" value={form.position} onChange={applyPosition} options={processOptions} />
+          <Input label="计件单价" type="number" value={form.piece_rate} onChange={(v) => setForm({ ...form, piece_rate: Number(v) })} />
+          <Select label="是否启用" value={form.active ? "1" : "0"} onChange={(v) => setForm({ ...form, active: v === "1" })} options={[["1", "启用"], ["0", "停用"]]} />
+          <div className="row-actions">
+            <button className="primary" onClick={submit}><Save size={17} /> {editingId ? "更新" : "保存"}</button>
+            {editingId && <button className="secondary" onClick={reset}><X size={17} /> 取消</button>}
+          </div>
+        </div>
+      </section>
+      <section className="panel span-8">
+        <div className="section-head"><h2>员工列表</h2><span className="status">岗位单价默认跟随工序</span></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr>{cols.map((col) => <th key={col[0]}>{col[1]}</th>)}<th>操作</th></tr></thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id}>
+                  {cols.map(([key]) => <td key={key}>{key === "piece_rate" ? money(row[key]) : key === "active" ? (row[key] ? "启用" : "停用") : String(row[key] ?? "")}</td>)}
+                  <td><button className="icon-button" onClick={() => edit(row)} title="修改"><Pencil size={16} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Processes({ rows = [], token, onDone }: { rows?: Row[]; token: string; onDone: () => void }) {
+  const [form, setForm] = useState({ name: "", default_price: 0 });
+  const [editingId, setEditingId] = useState<number | null>(null);
+
+  async function submit() {
+    const method = editingId ? "PUT" : "POST";
+    const path = editingId ? "/processes/" + editingId : "/processes";
+    await api(path, { method, body: JSON.stringify({ ...form, default_price: Number(form.default_price || 0) }) }, token);
+    reset();
+    onDone();
+  }
+
+  function edit(row: Row) {
+    setEditingId(Number(row.id));
+    setForm({ name: row.name || "", default_price: Number(row.default_price || 0) });
+  }
+
+  function reset() {
+    setEditingId(null);
+    setForm({ name: "", default_price: 0 });
+  }
+
+  async function move(index: number, offset: number) {
+    const next = [...rows];
+    const target = index + offset;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    await api("/processes/reorder", { method: "POST", body: JSON.stringify({ process_ids: next.map((row) => row.id) }) }, token);
+    onDone();
+  }
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>岗位/工序管理</h2></div>
+        <div className="form one">
+          <Input label="工序名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
+          <Input label="默认单价" type="number" value={form.default_price} onChange={(v) => setForm({ ...form, default_price: Number(v) })} />
+          <div className="row-actions">
+            <button className="primary" onClick={submit}><Save size={17} /> {editingId ? "更新" : "保存"}</button>
+            {editingId && <button className="secondary" onClick={reset}><X size={17} /> 取消</button>}
+          </div>
+        </div>
+      </section>
+      <section className="panel span-8">
+        <div className="section-head"><h2>工序顺序</h2><span className="status">修改默认单价会同步同岗位员工</span></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>顺序</th><th>工序名称</th><th>默认单价</th><th>位置</th><th>操作</th></tr></thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={row.id}>
+                  <td>{index + 1}</td>
+                  <td>{row.name}</td>
+                  <td>{money(row.default_price)}</td>
+                  <td>
+                    <div className="row-actions">
+                      <button className="icon-button" onClick={() => move(index, -1)} disabled={index === 0} title="上移"><ArrowUp size={16} /></button>
+                      <button className="icon-button" onClick={() => move(index, 1)} disabled={index === rows.length - 1} title="下移"><ArrowDown size={16} /></button>
+                    </div>
+                  </td>
+                  <td><button className="icon-button" onClick={() => edit(row)} title="修改"><Pencil size={16} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function Products({ rows = [], processes = [], token, onDone }: { rows?: Row[]; processes?: Row[]; token: string; onDone: () => void }) {
   const [form, setForm] = useState({ name: "", spec: "", unit: "件", default_flow: [] as Row[] });
   const flow = processes.map((p) => ({ name: p.name, price: p.default_price }));
@@ -208,13 +446,63 @@ function Finished({ rows = [], products = [], token, onDone }: { rows?: Row[]; p
 }
 
 function Orders({ rows = [], products = [], materials = [], token, onDone }: { rows?: Row[]; products?: Row[]; materials?: Row[]; token: string; onDone: () => void }) {
-  const [form, setForm] = useState({ order_no: `WO-${Date.now().toString().slice(-6)}`, product_id: "", quantity: 100, material_id: "", material_qty: 0 });
+  const emptyMaterial = { material_id: "", quantity: "" };
+  const [form, setForm] = useState({ order_no: nextOrderNo(), product_id: "", quantity: "", materials: [emptyMaterial] });
   const product = products.find((p) => String(p.id) === String(form.product_id));
+
+  function updateMaterial(index: number, patch: Row) {
+    const next = form.materials.map((item, i) => i === index ? { ...item, ...patch } : item);
+    setForm({ ...form, materials: next });
+  }
+
+  function addMaterial() {
+    setForm({ ...form, materials: [...form.materials, { ...emptyMaterial }] });
+  }
+
+  function removeMaterial(index: number) {
+    const next = form.materials.filter((_, i) => i !== index);
+    setForm({ ...form, materials: next.length ? next : [{ ...emptyMaterial }] });
+  }
+
   async function submit() {
-    await api("/work-orders", { method: "POST", body: JSON.stringify({ order_no: form.order_no, product_id: Number(form.product_id), quantity: Number(form.quantity), flow: product?.default_flow || [], materials: form.material_id ? [{ material_id: Number(form.material_id), quantity: Number(form.material_qty) }] : [] }) }, token);
+    const materialRows = form.materials
+      .filter((item) => item.material_id && Number(item.quantity) > 0)
+      .map((item) => ({ material_id: Number(item.material_id), quantity: Number(item.quantity) }));
+    await api("/work-orders", { method: "POST", body: JSON.stringify({ order_no: form.order_no, product_id: Number(form.product_id), quantity: Number(form.quantity || 0), flow: product?.default_flow || [], materials: materialRows }) }, token);
+    setForm({ order_no: nextOrderNo(), product_id: "", quantity: "", materials: [{ ...emptyMaterial }] });
     onDone();
   }
-  return <div className="grid"><section className="panel span-4"><div className="section-head"><h2>工单录入</h2></div><div className="form one"><Input label="工单号" value={form.order_no} onChange={(v) => setForm({ ...form, order_no: v })} /><Select label="产品" value={form.product_id} onChange={(v) => setForm({ ...form, product_id: v })} options={products.map((p) => [p.id, `${p.name} ${p.spec}`])} /><Input label="生产数量" type="number" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: Number(v) })} /><Select label="扣减原料" value={form.material_id} onChange={(v) => setForm({ ...form, material_id: v })} options={materials.map((m) => [m.id, m.name])} /><Input label="扣减数量" type="number" value={form.material_qty} onChange={(v) => setForm({ ...form, material_qty: Number(v) })} /><button className="primary" onClick={submit}><Save size={17} /> 开工</button></div></section><section className="panel span-8"><div className="section-head"><h2>工单列表</h2><button className="secondary" onClick={() => window.print()}><Printer size={17} /> 打印流程单</button></div><div className="print-sheet"><Table title="纸质流程单" rows={rows} cols={[["order_no", "工单号"], ["product_name", "产品"], ["quantity", "数量"], ["completed_quantity", "已完成"], ["status", "状态"]]} /><div className="signature-grid">{["裁剪", "车缝", "包装", "质检"].map((x) => <div key={x}>{x}<br />员工签名：</div>)}</div></div></section></div>;
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>工单录入</h2></div>
+        <div className="form one">
+          <Input label="工单号" value={form.order_no} onChange={(v) => setForm({ ...form, order_no: v })} />
+          <Select label="产品" value={form.product_id} onChange={(v) => setForm({ ...form, product_id: v })} options={products.map((p) => [p.id, String(p.name || "") + " " + String(p.spec || "")])} />
+          <Input label="生产数量" type="number" value={form.quantity} placeholder="请输入生产数量" onChange={(v) => setForm({ ...form, quantity: v })} />
+          <div className="sub-form">
+            <div className="section-head compact"><h2>扣减原材料</h2><button className="secondary" onClick={addMaterial}>新增</button></div>
+            {form.materials.map((item, index) => (
+              <div className="material-row" key={index}>
+                <Select label="原料" value={item.material_id} onChange={(v) => updateMaterial(index, { material_id: v })} options={materials.map((m) => [m.id, m.name])} />
+                <Input label="数量" type="number" value={item.quantity} placeholder="请输入扣减数量" onChange={(v) => updateMaterial(index, { quantity: v })} />
+                {form.materials.length > 1 && <button className="icon-button" onClick={() => removeMaterial(index)} title="删除"><X size={16} /></button>}
+              </div>
+            ))}
+          </div>
+          <button className="primary" onClick={submit}><Save size={17} /> 开工</button>
+        </div>
+      </section>
+      <section className="panel span-8">
+        <div className="section-head"><h2>工单列表</h2><button className="secondary" onClick={() => window.print()}><Printer size={17} /> 打印流程单</button></div>
+        <div className="print-sheet">
+          <Table title="纸质流程单" rows={rows} cols={[["order_no", "工单号"], ["product_name", "产品"], ["quantity", "数量"], ["completed_quantity", "已完成"], ["status", "状态"]]} />
+          <div className="signature-grid">{["裁剪", "车缝", "包装", "质检"].map((x) => <div key={x}>{x}<br />员工签名：</div>)}</div>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function Piece({ entries = [], employees = [], orders = [], token, onDone }: { entries?: Row[]; employees?: Row[]; orders?: Row[]; token: string; onDone: () => void }) {
@@ -228,8 +516,8 @@ function Piece({ entries = [], employees = [], orders = [], token, onDone }: { e
   return <div className="grid"><section className="panel span-4"><div className="section-head"><h2>每日计件录入</h2></div><div className="form one"><Input label="日期" type="date" value={form.entry_date} onChange={(v) => setForm({ ...form, entry_date: v })} /><Select label="工单号" value={form.order_no} onChange={(v) => setForm({ ...form, order_no: v, process_name: "" })} options={orders.map((o) => [o.order_no, o.order_no])} /><Select label="工序" value={form.process_name} onChange={(v) => setForm({ ...form, process_name: v })} options={processOptions} /><Select label="员工" value={form.employee_id} onChange={(v) => setForm({ ...form, employee_id: v })} options={employees.map((e) => [e.id, `${e.name} ${e.position}`])} /><Input label="数量" type="number" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: Number(v) })} /><button className="primary" onClick={submit}><Save size={17} /> 录入</button></div></section><Table title="计件记录 / 工资统计" rows={entries} cols={[["entry_date", "日期"], ["order_no", "工单"], ["process_name", "工序"], ["employee_name", "员工"], ["quantity", "数量"], ["unit_price", "单价"], ["wage", "工资"]]} span="span-8" /></div>;
 }
 
-function Input({ label, value, onChange, type = "text" }: { label: string; value: any; onChange: (value: string) => void; type?: string }) {
-  return <div className="field"><label>{label}</label><input type={type} value={value} onChange={(e) => onChange(e.target.value)} /></div>;
+function Input({ label, value, onChange, type = "text", placeholder = "" }: { label: string; value: any; onChange: (value: string) => void; type?: string; placeholder?: string }) {
+  return <div className="field"><label>{label}</label><input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} /></div>;
 }
 
 function Select({ label, value, onChange, options }: { label: string; value: any; onChange: (value: string) => void; options: any[][] }) {
