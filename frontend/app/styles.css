@@ -326,6 +326,21 @@ select {
   background: var(--soft);
 }
 
+.row-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.icon-button {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--brand-dark);
+  background: var(--soft);
+  border-radius: 7px;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
