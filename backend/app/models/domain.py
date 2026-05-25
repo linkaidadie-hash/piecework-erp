@@ -62,6 +62,7 @@ class Process(Base):
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
     name: Mapped[str] = mapped_column(String(80))
     default_price: Mapped[float] = mapped_column(Float, default=0)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Product(Base):
