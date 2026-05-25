@@ -8,6 +8,7 @@ import socket
 import subprocess
 import uuid
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,20 @@ MIN_FEATURE_MATCHES = 3
 
 def _run(command: list[str]) -> str:
     try:
-        return subprocess.check_output(command, stderr=subprocess.DEVNULL, text=True, timeout=3).strip()
+        startupinfo = None
+        creationflags = 0
+        if platform.system().lower() == "windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = subprocess.CREATE_NO_WINDOW
+        return subprocess.check_output(
+            command,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        ).strip()
     except Exception:
         return ""
 
@@ -78,10 +92,11 @@ def _linux_features() -> dict[str, str]:
     }
 
 
-def hardware_feature_hashes() -> list[str]:
+@lru_cache(maxsize=1)
+def hardware_feature_hashes() -> tuple[str, ...]:
     raw = _windows_features() if platform.system().lower() == "windows" else _linux_features()
     hashes = [_feature_hash(name, value) for name, value in raw.items()]
-    return sorted(x for x in hashes if x)
+    return tuple(sorted(x for x in hashes if x))
 
 
 def current_machine_id() -> str:
