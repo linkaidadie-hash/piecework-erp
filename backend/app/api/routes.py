@@ -2,7 +2,7 @@ import json
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
@@ -20,6 +20,7 @@ from app.schemas import (
     MaterialTxnIn,
     PieceEntryIn,
     ProcessIn,
+    ProcessReorderIn,
     ProductIn,
     TokenOut,
     WorkOrderIn,
@@ -32,6 +33,14 @@ def model_dict(obj, extra: dict | None = None):
     data = {col.name: getattr(obj, col.name) for col in obj.__table__.columns}
     data.update(extra or {})
     return data
+
+
+def ensure_sort_order_column(db: Session):
+    if db.bind and db.bind.dialect.name == "sqlite":
+        columns = [row[1] for row in db.execute(text("PRAGMA table_info(processes)")).all()]
+        if "sort_order" not in columns:
+            db.execute(text("ALTER TABLE processes ADD COLUMN sort_order INTEGER DEFAULT 0"))
+            db.commit()
 
 
 def ensure_non_negative_stock(current_stock: float, quantity: float, item_name: str):
@@ -66,9 +75,9 @@ def bootstrap(db: Session = Depends(get_db)):
         db.add(User(tenant_id=tenant.id, username=username, password_hash=hash_password(password), role=Role.admin))
         db.add_all(
             [
-                Process(tenant_id=tenant.id, name="裁剪", default_price=0.08),
-                Process(tenant_id=tenant.id, name="车缝", default_price=0.18),
-                Process(tenant_id=tenant.id, name="包装", default_price=0.05),
+                Process(tenant_id=tenant.id, name="裁剪", default_price=0.08, sort_order=10),
+                Process(tenant_id=tenant.id, name="车缝", default_price=0.18, sort_order=20),
+                Process(tenant_id=tenant.id, name="包装", default_price=0.05, sort_order=30),
                 Employee(tenant_id=tenant.id, name="张三", employee_no="E001", position="车缝", piece_rate=0.18),
                 Material(tenant_id=tenant.id, name="面料", unit="米", stock=500, min_stock=100),
                 Material(tenant_id=tenant.id, name="纽扣", unit="颗", stock=3000, min_stock=500),
@@ -141,16 +150,44 @@ def create_employee(payload: EmployeeIn, user: User = Depends(require_admin), db
 
 @router.get("/processes")
 def list_processes(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [model_dict(x) for x in db.scalars(select(Process).where(Process.tenant_id == user.tenant_id)).all()]
+    ensure_sort_order_column(db)
+    processes = db.scalars(select(Process).where(Process.tenant_id == user.tenant_id).order_by(Process.sort_order, Process.id)).all()
+    changed = False
+    for index, process in enumerate(processes, start=1):
+        if not process.sort_order:
+            process.sort_order = index * 10
+            changed = True
+    if changed:
+        db.commit()
+    return [model_dict(x) for x in processes]
 
 
 @router.post("/processes")
 def create_process(payload: ProcessIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    obj = Process(tenant_id=user.tenant_id, **payload.model_dump())
+    ensure_sort_order_column(db)
+    data = payload.model_dump()
+    if data.get("sort_order") is None:
+        max_order = db.scalar(select(func.max(Process.sort_order)).where(Process.tenant_id == user.tenant_id)) or 0
+        data["sort_order"] = max_order + 10
+    obj = Process(tenant_id=user.tenant_id, **data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
     return model_dict(obj)
+
+
+@router.post("/processes/reorder")
+def reorder_processes(payload: ProcessReorderIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    ensure_sort_order_column(db)
+    processes = db.scalars(select(Process).where(Process.tenant_id == user.tenant_id)).all()
+    by_id = {process.id: process for process in processes}
+    if set(payload.process_ids) != set(by_id):
+        raise HTTPException(status_code=400, detail="工序排序数据不完整")
+    for index, process_id in enumerate(payload.process_ids, start=1):
+        by_id[process_id].sort_order = index * 10
+    db.commit()
+    ordered = sorted(processes, key=lambda item: (item.sort_order, item.id))
+    return [model_dict(x) for x in ordered]
 
 
 @router.get("/products")
