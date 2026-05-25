@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Boxes, ClipboardList, Copy, Factory, FileText, LogOut, Package, Printer, Save, ShieldCheck, Upload, Users } from "lucide-react";
+import { ArrowDown, ArrowUp, BarChart3, Boxes, ClipboardList, Copy, Factory, FileText, LogOut, Package, Printer, Save, ShieldCheck, Upload, Users } from "lucide-react";
 import { api, LicenseStatus, money, Session } from "@/lib/api";
 
 type Row = Record<string, any>;
@@ -75,7 +75,7 @@ export default function Home() {
         {error && <p className="error">{error}</p>}
         {active === "dashboard" && <Dashboard dashboard={data.dashboard as Row} />}
         {active === "employees" && <Crud title="员工管理" rows={data.employees as Row[]} token={session.token} path="/employees" fields={[["name", "姓名"], ["employee_no", "工号"], ["position", "岗位/工序"], ["piece_rate", "计件单价", "number"]]} onDone={refresh} />}
-        {active === "processes" && <Crud title="岗位/工序管理" rows={data.processes as Row[]} token={session.token} path="/processes" fields={[["name", "工序名称"], ["default_price", "默认单价", "number"]]} onDone={refresh} />}
+        {active === "processes" && <Processes rows={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "products" && <Products rows={data.products as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "materials" && <Materials rows={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "finished" && <Finished rows={data.finished as Row[]} products={data.products as Row[]} token={session.token} onDone={refresh} />}
@@ -265,6 +265,61 @@ function Crud({ title, rows = [], token, path, fields, onDone }: { title: string
         <div className="form one">{fields.map(([key, label, type]) => <Input key={key} label={label} type={type} value={form[key]} onChange={(v) => setForm({ ...form, [key]: type === "number" ? Number(v) : v })} />)}<button className="primary" onClick={submit}><Save size={17} /> 保存</button></div>
       </section>
       <Table title="列表" rows={rows} cols={fields.map(([key, label]) => [key, label])} span="span-8" />
+    </div>
+  );
+}
+
+function Processes({ rows = [], token, onDone }: { rows?: Row[]; token: string; onDone: () => void }) {
+  const [form, setForm] = useState({ name: "", default_price: 0 });
+
+  async function submit() {
+    await api("/processes", { method: "POST", body: JSON.stringify(form) }, token);
+    setForm({ name: "", default_price: 0 });
+    onDone();
+  }
+
+  async function move(index: number, offset: number) {
+    const next = [...rows];
+    const target = index + offset;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    await api("/processes/reorder", { method: "POST", body: JSON.stringify({ process_ids: next.map((row) => row.id) }) }, token);
+    onDone();
+  }
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>岗位/工序管理</h2></div>
+        <div className="form one">
+          <Input label="工序名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
+          <Input label="默认单价" type="number" value={form.default_price} onChange={(v) => setForm({ ...form, default_price: Number(v) })} />
+          <button className="primary" onClick={submit}><Save size={17} /> 保存</button>
+        </div>
+      </section>
+      <section className="panel span-8">
+        <div className="section-head"><h2>工序顺序</h2><span className="status">影响新产品默认流程</span></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>顺序</th><th>工序名称</th><th>默认单价</th><th>位置</th></tr></thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={row.id}>
+                  <td>{index + 1}</td>
+                  <td>{row.name}</td>
+                  <td>{money(row.default_price)}</td>
+                  <td>
+                    <div className="row-actions">
+                      <button className="icon-button" onClick={() => move(index, -1)} disabled={index === 0} title="上移"><ArrowUp size={16} /></button>
+                      <button className="icon-button" onClick={() => move(index, 1)} disabled={index === rows.length - 1} title="下移"><ArrowDown size={16} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 }
