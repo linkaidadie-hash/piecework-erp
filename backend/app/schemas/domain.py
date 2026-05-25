@@ -46,6 +46,7 @@ class EmployeeIn(BaseModel):
 class ProcessIn(BaseModel):
     name: str
     default_price: float = 0
+    sort_order: int | None = None
 
     @field_validator("default_price")
     @classmethod
@@ -53,6 +54,10 @@ class ProcessIn(BaseModel):
         if value < 0:
             raise ValueError("默认单价不能小于 0")
         return value
+
+
+class ProcessReorderIn(BaseModel):
+    process_ids: list[int]
 
 
 class ProductIn(BaseModel):
