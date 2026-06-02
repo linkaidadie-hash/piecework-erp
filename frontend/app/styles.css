@@ -413,6 +413,223 @@ th {
   background: white;
 }
 
+/* === V2 工序追踪条 === */
+.process-tracker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.process-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 132px;
+  padding: 8px 10px;
+  background: #f3f5f3;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.process-step.done {
+  background: #e7f4ec;
+  border-color: #b4dec5;
+  color: var(--brand-dark);
+}
+
+.process-step.active {
+  background: #fff3e6;
+  border-color: #f0c79a;
+  color: #b35c1f;
+}
+
+.process-step-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: white;
+  border: 1px solid currentColor;
+}
+
+.process-step-name {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.process-step-meta {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* === V2 工单卡片 === */
+.order-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+}
+
+.order-card,
+.order-card-list {
+  padding: 14px;
+  background: #fbfcfb;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.order-card.variant-overdue {
+  border-color: var(--warn);
+  background: #fff5f3;
+}
+
+.order-card.variant-done {
+  opacity: 0.85;
+}
+
+.order-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.order-card-no {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--brand-dark);
+}
+
+.order-card-product {
+  font-size: 14px;
+  color: var(--ink);
+  margin-top: 2px;
+}
+
+.order-card-customer {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.order-card-meta {
+  text-align: right;
+}
+
+.order-card-qty {
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.order-card-qty-done {
+  color: var(--brand-dark);
+}
+
+.order-card-qty-total {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.order-card-deadline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.order-card-deadline.danger {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.order-card-deadline.warn {
+  color: #b35c1f;
+  font-weight: 700;
+}
+
+.order-card-barcode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 4px 8px;
+  background: white;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.order-card-barcode code {
+  font-size: 12px;
+  color: var(--ink);
+}
+
+/* === V2 条码打印浮层 === */
+.print-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 26, 21, 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 20px;
+}
+
+.print-card {
+  width: min(560px, 100%);
+  max-height: 92vh;
+  overflow: auto;
+  padding: 24px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+}
+
+.barcode-block {
+  padding: 20px;
+  border: 2px dashed #222;
+  border-radius: 10px;
+  text-align: center;
+}
+
+.barcode-meta {
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.7;
+  margin-bottom: 16px;
+  color: #111;
+}
+
+.barcode-value {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  margin: 12px 0;
+  color: #111;
+}
+
+.barcode-stripes {
+  display: flex;
+  align-items: end;
+  justify-content: center;
+  gap: 2px;
+  height: 60px;
+  margin: 12px 0;
+  background: white;
+}
+
+.barcode-stripes span {
+  width: 3px;
+  background: #111;
+  display: inline-block;
+}
+
 .print-title {
   display: flex;
   justify-content: space-between;
@@ -488,13 +705,27 @@ th {
   }
 
   .print-sheet,
-  .print-sheet * {
+  .print-sheet *,
+  .print-card,
+  .print-card * {
     visibility: visible;
   }
 
-  .print-sheet {
+  .print-sheet,
+  .print-card {
     position: absolute;
     inset: 0;
     border: 0;
+    background: white;
+  }
+
+  .print-overlay {
+    background: white;
+    padding: 0;
+  }
+
+  .print-card {
+    box-shadow: none;
+    border-radius: 0;
   }
 }

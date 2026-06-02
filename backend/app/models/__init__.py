@@ -10,6 +10,7 @@ from app.models.domain import (
     Tenant,
     User,
     WorkOrder,
+    WorkOrderProcessProgress,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "Tenant",
     "User",
     "WorkOrder",
+    "WorkOrderProcessProgress",
 ]

@@ -1,5 +1,6 @@
 import json
-from datetime import date, timedelta
+import secrets
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select, text
@@ -10,7 +11,20 @@ from app.core.config import settings
 from app.core.license import license_status, require_valid_license, verify_license_data, write_license
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db import get_db
-from app.models import Employee, FinishedGood, InventoryTxn, Material, PieceEntry, Process, Product, Role, Tenant, User, WorkOrder
+from app.models import (
+    Employee,
+    FinishedGood,
+    InventoryTxn,
+    Material,
+    PieceEntry,
+    Process,
+    Product,
+    Role,
+    Tenant,
+    User,
+    WorkOrder,
+    WorkOrderProcessProgress,
+)
 from app.schemas import (
     BootstrapOut,
     EmployeeIn,
@@ -24,6 +38,7 @@ from app.schemas import (
     ProductIn,
     TokenOut,
     WorkOrderIn,
+    WorkOrderProgressOut,
 )
 
 router = APIRouter()
@@ -41,6 +56,95 @@ def ensure_sort_order_column(db: Session):
         if "sort_order" not in columns:
             db.execute(text("ALTER TABLE processes ADD COLUMN sort_order INTEGER DEFAULT 0"))
             db.commit()
+
+
+def ensure_work_order_columns(db: Session):
+    """V2 工单字段迁移：customer_name / deadline / notes / barcode.
+
+    V1 的工作流里只跑了 Base.metadata.create_all 不会补已有表的列.
+    这里照搬 ensure_sort_order_column 的 SQLite 模式兜底.
+    生产 Postgres 需要走 Alembic 之类的正式迁移, 但本项目暂用此法.
+    """
+    if not db.bind or db.bind.dialect.name != "sqlite":
+        return
+    existing = {row[1] for row in db.execute(text("PRAGMA table_info(work_orders)")).all()}
+    additions = [
+        ("barcode", "VARCHAR(80)"),
+        ("customer_name", "VARCHAR(120) DEFAULT ''"),
+        ("deadline", "DATE"),
+        ("notes", "TEXT DEFAULT ''"),
+    ]
+    changed = False
+    for col_name, ddl in additions:
+        if col_name not in existing:
+            db.execute(text(f"ALTER TABLE work_orders ADD COLUMN {col_name} {ddl}"))
+            changed = True
+    if changed:
+        db.commit()
+
+
+def generate_barcode(order_no: str) -> str:
+    """工单条码生成: 用工单号 + 6位随机后缀, 保证工单/扫码枪打印后唯一."""
+    suffix = secrets.token_hex(3).upper()
+    return f"BAR-{order_no}-{suffix}"
+
+
+def ensure_work_order_process_progress(db: Session, work_order: WorkOrder):
+    """建工单时按 flow 顺序铺好每道工序的进度行, 状态 pending."""
+    flow = json.loads(work_order.flow or "[]")
+    existing = {
+        row.process_name: row
+        for row in db.scalars(
+            select(WorkOrderProcessProgress).where(WorkOrderProcessProgress.work_order_id == work_order.id)
+        ).all()
+    }
+    for index, step in enumerate(flow):
+        name = step.get("name")
+        if not name:
+            continue
+        if name in existing:
+            continue
+        db.add(
+            WorkOrderProcessProgress(
+                tenant_id=work_order.tenant_id,
+                work_order_id=work_order.id,
+                process_name=name,
+                sort_order=(index + 1) * 10,
+                quantity_done=0,
+                status="pending",
+            )
+        )
+
+
+def recompute_process_progress(db: Session, work_order: WorkOrder, process_name: str, employee: Employee | None = None):
+    """某工序刚录了一批数 → 把进度行累加, 达量则标记 done."""
+    progress = db.scalar(
+        select(WorkOrderProcessProgress).where(
+            WorkOrderProcessProgress.work_order_id == work_order.id,
+            WorkOrderProcessProgress.process_name == process_name,
+        )
+    )
+    if not progress:
+        # 流程里没定义这道工序, 跳过
+        return
+    # 把所有 piece_entries 的 quantity 累加
+    total = db.scalar(
+        select(func.coalesce(func.sum(PieceEntry.quantity), 0.0)).where(
+            PieceEntry.work_order_id == work_order.id,
+            PieceEntry.process_name == process_name,
+        )
+    ) or 0.0
+    progress.quantity_done = float(total)
+    if progress.quantity_done >= work_order.quantity:
+        progress.status = "done"
+    elif progress.quantity_done > 0:
+        progress.status = "in_progress"
+    else:
+        progress.status = "pending"
+    if employee:
+        progress.last_employee_id = employee.id
+        progress.last_employee_name = employee.name
+    progress.last_entry_at = datetime.utcnow()
 
 
 def ensure_non_negative_stock(current_stock: float, quantity: float, item_name: str):
@@ -300,18 +404,24 @@ def finished_txn(payload: FinishedTxnIn, user: User = Depends(get_current_user),
 
 @router.get("/work-orders")
 def list_work_orders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_work_order_columns(db)
     orders = db.scalars(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id).order_by(WorkOrder.created_at.desc())).all()
     return [model_dict(x, {"flow": json.loads(x.flow or "[]"), "materials": json.loads(x.materials or "[]"), "product_name": x.product.name}) for x in orders]
 
 
 @router.post("/work-orders")
 def create_work_order(payload: WorkOrderIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    ensure_work_order_columns(db)
     get_tenant_product(db, user.tenant_id, payload.product_id)
     if db.scalar(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.order_no == payload.order_no)):
         raise HTTPException(status_code=400, detail="工单号已存在")
     data = payload.model_dump()
     materials = data.pop("materials")
     flow = data.pop("flow")
+    barcode = (data.pop("barcode") or "").strip() or generate_barcode(payload.order_no)
+    if db.scalar(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.barcode == barcode)):
+        raise HTTPException(status_code=400, detail="条码已存在，请重试或手动指定")
+    data["deadline"] = data.get("deadline") or None
     material_totals: dict[int, float] = {}
     for item in materials:
         material_id = int(item["material_id"])
@@ -328,19 +438,90 @@ def create_work_order(payload: WorkOrderIn, user: User = Depends(require_admin),
         ensure_non_negative_stock(mat.stock, qty, mat.name)
         mat.stock -= qty
         db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="material", item_id=mat.id, direction="out", quantity=qty, reason=f"工单 {payload.order_no} 开始扣料"))
-    obj = WorkOrder(tenant_id=user.tenant_id, **data, flow=json.dumps(flow, ensure_ascii=False), materials=json.dumps(normalized_materials, ensure_ascii=False))
+    obj = WorkOrder(tenant_id=user.tenant_id, **data, barcode=barcode, flow=json.dumps(flow, ensure_ascii=False), materials=json.dumps(normalized_materials, ensure_ascii=False))
     db.add(obj)
+    db.flush()
+    ensure_work_order_process_progress(db, obj)
     db.commit()
     db.refresh(obj)
-    return model_dict(obj, {"flow": flow, "materials": normalized_materials})
+    return model_dict(obj, {"flow": flow, "materials": normalized_materials, "barcode": barcode})
 
 
 @router.get("/work-orders/{order_id}/print")
 def print_sheet(order_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_work_order_columns(db)
     order = db.get(WorkOrder, order_id)
     if not order or order.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="工单不存在")
-    return {"order": model_dict(order, {"flow": json.loads(order.flow or "[]"), "materials": json.loads(order.materials or "[]"), "product_name": order.product.name})}
+    progress = db.scalars(
+        select(WorkOrderProcessProgress)
+        .where(WorkOrderProcessProgress.work_order_id == order.id)
+        .order_by(WorkOrderProcessProgress.sort_order, WorkOrderProcessProgress.id)
+    ).all()
+    return {
+        "order": model_dict(
+            order,
+            {
+                "flow": json.loads(order.flow or "[]"),
+                "materials": json.loads(order.materials or "[]"),
+                "product_name": order.product.name,
+            },
+        ),
+        "progress": [
+            WorkOrderProgressOut(
+                id=row.id,
+                process_name=row.process_name,
+                sort_order=row.sort_order,
+                quantity_done=row.quantity_done,
+                status=row.status,
+                last_employee_name=row.last_employee_name,
+                last_entry_at=row.last_entry_at.isoformat() if row.last_entry_at else None,
+            ).model_dump()
+            for row in progress
+        ],
+    }
+
+
+@router.get("/work-orders/{order_id}/progress")
+def work_order_progress(order_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    order = db.get(WorkOrder, order_id)
+    if not order or order.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    progress = db.scalars(
+        select(WorkOrderProcessProgress)
+        .where(WorkOrderProcessProgress.work_order_id == order.id)
+        .order_by(WorkOrderProcessProgress.sort_order, WorkOrderProcessProgress.id)
+    ).all()
+    return [
+        WorkOrderProgressOut(
+            id=row.id,
+            process_name=row.process_name,
+            sort_order=row.sort_order,
+            quantity_done=row.quantity_done,
+            status=row.status,
+            last_employee_name=row.last_employee_name,
+            last_entry_at=row.last_entry_at.isoformat() if row.last_entry_at else None,
+        ).model_dump()
+        for row in progress
+    ]
+
+
+@router.get("/work-orders/by-barcode/{barcode}")
+def find_work_order_by_barcode(barcode: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_work_order_columns(db)
+    order = db.scalar(
+        select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.barcode == barcode)
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="未找到对应工单")
+    return model_dict(
+        order,
+        {
+            "flow": json.loads(order.flow or "[]"),
+            "materials": json.loads(order.materials or "[]"),
+            "product_name": order.product.name,
+        },
+    )
 
 
 @router.get("/piece-entries")
@@ -351,7 +532,18 @@ def list_piece_entries(user: User = Depends(get_current_user), db: Session = Dep
 
 @router.post("/piece-entries")
 def create_piece_entry(payload: PieceEntryIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    order = db.scalar(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.order_no == payload.order_no))
+    ensure_work_order_columns(db)
+    if not payload.order_no and not payload.barcode:
+        raise HTTPException(status_code=400, detail="工单号或条码至少填一个")
+    order: WorkOrder | None = None
+    if payload.barcode:
+        order = db.scalar(
+            select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.barcode == payload.barcode)
+        )
+    if not order and payload.order_no:
+        order = db.scalar(
+            select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.order_no == payload.order_no)
+        )
     emp = db.get(Employee, payload.employee_id)
     if not order or not emp or emp.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="工单或员工不存在")
@@ -379,13 +571,16 @@ def create_piece_entry(payload: PieceEntryIn, user: User = Depends(get_current_u
         fg.stock += payload.quantity
         db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="finished", item_id=order.product_id, direction="in", quantity=payload.quantity, reason=f"工单 {order.order_no} 完工入库"))
     db.add(obj)
+    db.flush()
+    recompute_process_progress(db, order, payload.process_name, emp)
     db.commit()
     db.refresh(obj)
-    return model_dict(obj, {"employee_name": emp.name, "order_no": order.order_no})
+    return model_dict(obj, {"employee_name": emp.name, "order_no": order.order_no, "barcode": order.barcode})
 
 
 @router.get("/dashboard")
 def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_work_order_columns(db)
     today = date.today()
     today_entries = db.scalars(select(PieceEntry).where(PieceEntry.tenant_id == user.tenant_id, PieceEntry.entry_date == today)).all()
     ranking = db.execute(
@@ -396,13 +591,62 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
         .order_by(func.sum(PieceEntry.wage).desc())
     ).all()
     materials = db.scalars(select(Material).where(Material.tenant_id == user.tenant_id)).all()
-    orders = db.scalars(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id)).all()
+    orders = db.scalars(
+        select(WorkOrder)
+        .where(WorkOrder.tenant_id == user.tenant_id)
+        .order_by(WorkOrder.created_at.desc())
+    ).all()
+    # 进度一次取齐, 用 order_id 分桶
+    progress_rows = db.scalars(
+        select(WorkOrderProcessProgress)
+        .where(WorkOrderProcessProgress.tenant_id == user.tenant_id)
+        .order_by(WorkOrderProcessProgress.sort_order, WorkOrderProcessProgress.id)
+    ).all()
+    progress_by_order: dict[int, list[dict]] = {}
+    for row in progress_rows:
+        progress_by_order.setdefault(row.work_order_id, []).append(
+            {
+                "id": row.id,
+                "process_name": row.process_name,
+                "sort_order": row.sort_order,
+                "quantity_done": row.quantity_done,
+                "status": row.status,
+                "last_employee_name": row.last_employee_name,
+                "last_entry_at": row.last_entry_at.isoformat() if row.last_entry_at else None,
+            }
+        )
+    # 工单按状态分类
+    in_progress_orders: list[dict] = []
+    completed_orders: list[dict] = []
+    overdue_orders: list[dict] = []
+    for order in orders:
+        item = model_dict(
+            order,
+            {
+                "product_name": order.product.name,
+                "progress": progress_by_order.get(order.id, []),
+            },
+        )
+        if order.status == "已完成":
+            completed_orders.append(item)
+        elif order.deadline and order.deadline < today and order.completed_quantity < order.quantity:
+            overdue_orders.append(item)
+        else:
+            in_progress_orders.append(item)
     return {
         "today_quantity": sum(x.quantity for x in today_entries),
         "today_wage": sum(x.wage for x in today_entries),
-        "work_orders": [model_dict(x, {"product_name": x.product.name}) for x in orders],
+        "in_progress_orders": in_progress_orders,
+        "completed_orders": completed_orders,
+        "overdue_orders": overdue_orders,
+        "work_orders": [model_dict(order, {"product_name": order.product.name, "progress": progress_by_order.get(order.id, [])}) for order in orders],
         "materials": [model_dict(x) for x in materials],
         "low_materials": [model_dict(x) for x in materials if x.stock <= x.min_stock],
         "finished_goods": list_finished_goods(user, db),
         "ranking": [{"employee_name": name, "quantity": qty or 0, "wage": wage or 0} for name, qty, wage in ranking],
+        "stats": {
+            "in_progress_count": len(in_progress_orders),
+            "completed_count": len(completed_orders),
+            "overdue_count": len(overdue_orders),
+        },
     }

@@ -1,10 +1,45 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, BarChart3, Boxes, ClipboardList, Copy, Factory, FileText, LogOut, Package, Pencil, Printer, Save, ShieldCheck, Upload, Users, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  BarChart3,
+  Boxes,
+  CalendarClock,
+  Check,
+  CheckCircle2,
+  ClipboardList,
+  Copy,
+  Factory,
+  FileText,
+  LogOut,
+  Package,
+  Pencil,
+  Printer,
+  QrCode,
+  Save,
+  ScanLine,
+  ShieldCheck,
+  Upload,
+  Users,
+  X,
+  XCircle,
+} from "lucide-react";
 import { api, LicenseStatus, money, Session } from "@/lib/api";
 
 type Row = Record<string, any>;
+
+type ProcessProgress = {
+  id: number;
+  process_name: string;
+  sort_order: number;
+  quantity_done: number;
+  status: "pending" | "in_progress" | "done";
+  last_employee_name: string;
+  last_entry_at: string | null;
+};
 
 function nextOrderNo() {
   const now = new Date();
@@ -15,13 +50,13 @@ function nextOrderNo() {
 
 const tabs = [
   ["dashboard", "看板", BarChart3],
+  ["piece", "扫码报工", ScanLine],
+  ["orders", "工单", ClipboardList],
   ["employees", "员工", Users],
   ["processes", "工序", Factory],
   ["products", "产品", Package],
   ["materials", "原料", Boxes],
   ["finished", "成品", Package],
-  ["orders", "工单", ClipboardList],
-  ["piece", "计件", FileText],
   ["license", "授权", ShieldCheck],
 ] as const;
 
@@ -63,7 +98,7 @@ export default function Home() {
         <div className="brand">
           <div className="brand-mark"><Factory size={19} /></div>
           <div>
-            <div>中小企业生产系统</div>
+            <div>工厂轻 MES 计件管理系统 V2</div>
             <small>{session.company}</small>
           </div>
         </div>
@@ -81,13 +116,13 @@ export default function Home() {
       <main className="main">
         {error && <p className="error">{error}</p>}
         {active === "dashboard" && <Dashboard dashboard={data.dashboard as Row} />}
+        {active === "piece" && <Piece entries={data.entries as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
+        {active === "orders" && <Orders rows={data.orders as Row[]} products={data.products as Row[]} materials={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "employees" && <Employees rows={data.employees as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "processes" && <Processes rows={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "products" && <Products rows={data.products as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "materials" && <Materials rows={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "finished" && <Finished rows={data.finished as Row[]} products={data.products as Row[]} token={session.token} onDone={refresh} />}
-        {active === "orders" && <Orders rows={data.orders as Row[]} products={data.products as Row[]} materials={data.materials as Row[]} token={session.token} onDone={refresh} />}
-        {active === "piece" && <Piece entries={data.entries as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} token={session.token} onDone={refresh} />}
         {active === "license" && <LicenseManager />}
       </main>
     </div>
@@ -134,7 +169,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   return (
     <div className="login">
       <div className="login-panel">
-        <h1>中小企业生产系统</h1>
+        <h1>工厂轻 MES 计件管理系统 V2</h1>
         <p className="hint">本机授权已通过。请输入企业账号登录系统。</p>
         <div className="form one">
           {[
@@ -220,22 +255,158 @@ function LicenseManager({ initialStatus, onStatus }: { initialStatus?: LicenseSt
   );
 }
 
+function ProcessTracker({ progress, orderQty }: { progress: ProcessProgress[]; orderQty: number }) {
+  if (!progress || progress.length === 0) {
+    return <span className="hint">本工单未配置工序流程</span>;
+  }
+  return (
+    <div className="process-tracker">
+      {progress.map((step) => {
+        const isDone = step.status === "done";
+        const isInProgress = step.status === "in_progress";
+        return (
+          <div className={`process-step ${isDone ? "done" : isInProgress ? "active" : "pending"}`} key={step.id || step.process_name}>
+            <div className="process-step-icon">
+              {isDone ? <Check size={14} /> : isInProgress ? <AlertTriangle size={14} /> : <XCircle size={14} />}
+            </div>
+            <div className="process-step-body">
+              <div className="process-step-name">{step.process_name}</div>
+              <div className="process-step-meta">
+                {step.quantity_done}/{orderQty}
+                {step.last_employee_name ? ` · ${step.last_employee_name}` : ""}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Dashboard({ dashboard = {} }: { dashboard?: Row }) {
-  const orders = (dashboard.work_orders || []) as Row[];
+  const stats = dashboard.stats || { in_progress_count: 0, completed_count: 0, overdue_count: 0 };
+  const inProgress = (dashboard.in_progress_orders || []) as Row[];
+  const completed = (dashboard.completed_orders || []) as Row[];
+  const overdue = (dashboard.overdue_orders || []) as Row[];
+  const lowMaterials = (dashboard.low_materials || []) as Row[];
   return (
     <>
-      <div className="section-head"><h2>手机老板看板</h2><span className="status">实时汇总</span></div>
+      <div className="section-head">
+        <h2>生产看板 · 老板版</h2>
+        <span className="status">实时汇总 · 手机可用</span>
+      </div>
       <div className="grid">
         <Metric label="今日产量" value={dashboard.today_quantity || 0} sub="按计件录入汇总" />
         <Metric label="今日工资" value={`¥ ${money(dashboard.today_wage)}`} sub="系统自动计算" />
-        <Metric label="进行工单" value={orders.length} sub="生产进度追踪" />
-        <Metric label="缺料提醒" value={(dashboard.low_materials || []).length} sub="低于安全库存" warn />
-        <Table title="工单进度" rows={orders} cols={[["order_no", "工单号"], ["product_name", "产品"], ["quantity", "数量"], ["completed_quantity", "已完成"], ["status", "状态"]]} span="span-7" />
+        <Metric label="进行中工单" value={stats.in_progress_count || 0} sub="进行中的工单数量" />
+        <Metric label="已延期" value={stats.overdue_count || 0} sub="超交期未完工" warn={(stats.overdue_count || 0) > 0} />
+        <Metric label="已完成" value={stats.completed_count || 0} sub="近 7 天累计" />
+        <Metric label="缺料提醒" value={lowMaterials.length} sub={lowMaterials.length ? "请尽快补料" : "库存正常"} warn={lowMaterials.length > 0} />
+
+        {overdue.length > 0 && (
+          <section className="panel span-12">
+            <div className="section-head">
+              <h2 className="danger"><AlertTriangle size={18} /> 延期工单 · 红色提醒</h2>
+              <span className="status danger">需立即处理</span>
+            </div>
+            <div className="order-cards">
+              {overdue.map((order) => (
+                <OrderCard key={order.id} order={order} variant="overdue" />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className="panel span-12">
+          <div className="section-head">
+            <h2>进行中工单 · 工序追踪</h2>
+            <span className="status">{inProgress.length} 单</span>
+          </div>
+          {inProgress.length === 0 ? <p className="hint">当前没有进行中的工单</p> : (
+            <div className="order-cards">
+              {inProgress.map((order) => (
+                <OrderCard key={order.id} order={order} variant="in_progress" />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel span-7">
+          <div className="section-head">
+            <h2><ClipboardList size={18} /> 库存预警</h2>
+            <span className="status">低于安全库存</span>
+          </div>
+          {lowMaterials.length === 0 ? (
+            <p className="hint">所有原料库存充足</p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>原料</th><th>当前库存</th><th>预警线</th><th>单位</th><th>差额</th></tr>
+                </thead>
+                <tbody>
+                  {lowMaterials.map((m) => (
+                    <tr key={m.id}>
+                      <td className="danger">{m.name}</td>
+                      <td className="danger">{m.stock}</td>
+                      <td>{m.min_stock}</td>
+                      <td>{m.unit}</td>
+                      <td className="danger">{Number(m.min_stock - m.stock).toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
         <Table title="员工计件排名" rows={(dashboard.ranking || []) as Row[]} cols={[["employee_name", "员工"], ["quantity", "数量"], ["wage", "工资"]]} span="span-5" />
-        <Table title="原材料库存" rows={(dashboard.materials || []) as Row[]} cols={[["name", "原料"], ["stock", "库存"], ["unit", "单位"], ["min_stock", "预警线"]]} span="span-7" />
-        <Table title="成品库存" rows={(dashboard.finished_goods || []) as Row[]} cols={[["product_name", "产品"], ["spec", "规格"], ["stock", "库存"], ["unit", "单位"]]} span="span-5" />
+        <section className="panel span-12">
+          <div className="section-head">
+            <h2><CheckCircle2 size={18} /> 今日已完成工单</h2>
+            <span className="status">{completed.length} 单</span>
+          </div>
+          {completed.length === 0 ? <p className="hint">今天还没有完工工单</p> : (
+            <div className="order-cards">
+              {completed.slice(0, 8).map((order) => (
+                <OrderCard key={order.id} order={order} variant="done" />
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </>
+  );
+}
+
+function OrderCard({ order, variant }: { order: Row; variant: "in_progress" | "done" | "overdue" }) {
+  const daysToDeadline = order.deadline ? Math.ceil((new Date(order.deadline).getTime() - Date.now()) / 86400000) : null;
+  return (
+    <div className={`order-card variant-${variant}`}>
+      <div className="order-card-head">
+        <div>
+          <div className="order-card-no">{order.order_no}</div>
+          <div className="order-card-product">{order.product_name}{order.spec ? ` · ${order.spec}` : ""}</div>
+          {order.customer_name ? <div className="order-card-customer">客户：{order.customer_name}</div> : null}
+        </div>
+        <div className="order-card-meta">
+          <div className="order-card-qty">
+            <span className="order-card-qty-done">{order.completed_quantity}</span>
+            <span className="order-card-qty-total">/ {order.quantity}</span>
+          </div>
+          {order.deadline ? (
+            <div className={`order-card-deadline ${variant === "overdue" ? "danger" : daysToDeadline !== null && daysToDeadline <= 3 ? "warn" : ""}`}>
+              <CalendarClock size={13} /> {order.deadline}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      {order.barcode ? (
+        <div className="order-card-barcode">
+          <QrCode size={13} /> <code>{order.barcode}</code>
+        </div>
+      ) : null}
+      <ProcessTracker progress={(order.progress || []) as ProcessProgress[]} orderQty={Number(order.quantity || 0)} />
+    </div>
   );
 }
 
@@ -447,7 +618,16 @@ function Finished({ rows = [], products = [], token, onDone }: { rows?: Row[]; p
 
 function Orders({ rows = [], products = [], materials = [], token, onDone }: { rows?: Row[]; products?: Row[]; materials?: Row[]; token: string; onDone: () => void }) {
   const emptyMaterial = { material_id: "", quantity: "" };
-  const [form, setForm] = useState({ order_no: nextOrderNo(), product_id: "", quantity: "", materials: [emptyMaterial] });
+  const [form, setForm] = useState({
+    order_no: nextOrderNo(),
+    product_id: "",
+    quantity: "",
+    materials: [emptyMaterial],
+    customer_name: "",
+    deadline: "",
+    notes: "",
+  });
+  const [showPrint, setShowPrint] = useState<Row | null>(null);
   const product = products.find((p) => String(p.id) === String(form.product_id));
 
   function updateMaterial(index: number, patch: Row) {
@@ -468,8 +648,19 @@ function Orders({ rows = [], products = [], materials = [], token, onDone }: { r
     const materialRows = form.materials
       .filter((item) => item.material_id && Number(item.quantity) > 0)
       .map((item) => ({ material_id: Number(item.material_id), quantity: Number(item.quantity) }));
-    await api("/work-orders", { method: "POST", body: JSON.stringify({ order_no: form.order_no, product_id: Number(form.product_id), quantity: Number(form.quantity || 0), flow: product?.default_flow || [], materials: materialRows }) }, token);
-    setForm({ order_no: nextOrderNo(), product_id: "", quantity: "", materials: [{ ...emptyMaterial }] });
+    const payload = {
+      order_no: form.order_no,
+      product_id: Number(form.product_id),
+      quantity: Number(form.quantity || 0),
+      flow: product?.default_flow || [],
+      materials: materialRows,
+      customer_name: form.customer_name || "",
+      deadline: form.deadline || null,
+      notes: form.notes || "",
+    };
+    const created = await api<Row>("/work-orders", { method: "POST", body: JSON.stringify(payload) }, token);
+    setForm({ order_no: nextOrderNo(), product_id: "", quantity: "", materials: [{ ...emptyMaterial }], customer_name: "", deadline: "", notes: "" });
+    setShowPrint(created);
     onDone();
   }
 
@@ -479,8 +670,11 @@ function Orders({ rows = [], products = [], materials = [], token, onDone }: { r
         <div className="section-head"><h2>工单录入</h2></div>
         <div className="form one">
           <Input label="工单号" value={form.order_no} onChange={(v) => setForm({ ...form, order_no: v })} />
+          <Input label="客户名称" value={form.customer_name} onChange={(v) => setForm({ ...form, customer_name: v })} placeholder="可选, 例如: 深圳某某电子" />
           <Select label="产品" value={form.product_id} onChange={(v) => setForm({ ...form, product_id: v })} options={products.map((p) => [p.id, String(p.name || "") + " " + String(p.spec || "")])} />
           <Input label="生产数量" type="number" value={form.quantity} placeholder="请输入生产数量" onChange={(v) => setForm({ ...form, quantity: v })} />
+          <Input label="交期" type="date" value={form.deadline} onChange={(v) => setForm({ ...form, deadline: v })} />
+          <Input label="备注" value={form.notes} onChange={(v) => setForm({ ...form, notes: v })} placeholder="可选" />
           <div className="sub-form">
             <div className="section-head compact"><h2>扣减原材料</h2><button className="secondary" onClick={addMaterial}>新增</button></div>
             {form.materials.map((item, index) => (
@@ -491,29 +685,220 @@ function Orders({ rows = [], products = [], materials = [], token, onDone }: { r
               </div>
             ))}
           </div>
-          <button className="primary" onClick={submit}><Save size={17} /> 开工</button>
+          <button className="primary" onClick={submit}><Save size={17} /> 开工 (自动生成条码)</button>
         </div>
       </section>
       <section className="panel span-8">
-        <div className="section-head"><h2>工单列表</h2><button className="secondary" onClick={() => window.print()}><Printer size={17} /> 打印流程单</button></div>
+        <div className="section-head">
+          <h2>工单列表 · 工序追踪</h2>
+          <button className="secondary" onClick={() => window.print()}><Printer size={17} /> 打印流程单</button>
+        </div>
         <div className="print-sheet">
           <Table title="纸质流程单" rows={rows} cols={[["order_no", "工单号"], ["product_name", "产品"], ["quantity", "数量"], ["completed_quantity", "已完成"], ["status", "状态"]]} />
           <div className="signature-grid">{["裁剪", "车缝", "包装", "质检"].map((x) => <div key={x}>{x}<br />员工签名：</div>)}</div>
         </div>
+        <div className="order-cards" style={{ marginTop: 16 }}>
+          {rows.map((order) => (
+            <div key={order.id} className="order-card-list">
+              <div className="order-card-head">
+                <div>
+                  <div className="order-card-no">{order.order_no}</div>
+                  <div className="order-card-product">{order.product_name}{order.spec ? ` · ${order.spec}` : ""}</div>
+                  {order.customer_name ? <div className="order-card-customer">客户：{order.customer_name}</div> : null}
+                </div>
+                <div className="order-card-meta">
+                  <div className="order-card-qty">
+                    <span className="order-card-qty-done">{order.completed_quantity}</span>
+                    <span className="order-card-qty-total">/ {order.quantity}</span>
+                  </div>
+                  {order.deadline ? <div className="order-card-deadline"><CalendarClock size={13} /> {order.deadline}</div> : null}
+                </div>
+              </div>
+              {order.barcode ? (
+                <div className="order-card-barcode">
+                  <QrCode size={13} /> <code>{order.barcode}</code>
+                </div>
+              ) : null}
+              <ProcessTracker progress={(order.progress || []) as ProcessProgress[]} orderQty={Number(order.quantity || 0)} />
+              <div className="row-actions" style={{ marginTop: 8 }}>
+                <button className="secondary" onClick={() => setShowPrint(order)}><Printer size={14} /> 打印条码</button>
+              </div>
+            </div>
+          ))}
+        </div>
       </section>
+      {showPrint && <BarcodePrint order={showPrint} onClose={() => setShowPrint(null)} />}
     </div>
   );
 }
 
-function Piece({ entries = [], employees = [], orders = [], token, onDone }: { entries?: Row[]; employees?: Row[]; orders?: Row[]; token: string; onDone: () => void }) {
-  const [form, setForm] = useState({ entry_date: new Date().toISOString().slice(0, 10), order_no: "", process_name: "", employee_id: "", quantity: 0 });
-  const order = orders.find((o) => o.order_no === form.order_no);
-  const processOptions = useMemo(() => (order?.flow || []).map((f: Row) => [f.name, `${f.name} ¥${f.price}`]), [order]);
-  async function submit() {
-    await api("/piece-entries", { method: "POST", body: JSON.stringify({ ...form, employee_id: Number(form.employee_id), quantity: Number(form.quantity) }) }, token);
-    onDone();
+function BarcodePrint({ order, onClose }: { order: Row; onClose: () => void }) {
+  return (
+    <div className="print-overlay" onClick={onClose}>
+      <div className="print-card" onClick={(e) => e.stopPropagation()}>
+        <div className="section-head">
+          <h2>工单条码 · 扫码枪扫这个</h2>
+          <button className="icon-button" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="barcode-block">
+          <div className="barcode-meta">
+            <div><strong>工单号：</strong>{order.order_no}</div>
+            <div><strong>产品：</strong>{order.product_name}{order.spec ? ` / ${order.spec}` : ""}</div>
+            <div><strong>数量：</strong>{order.quantity}</div>
+            {order.deadline ? <div><strong>交期：</strong>{order.deadline}</div> : null}
+            {order.customer_name ? <div><strong>客户：</strong>{order.customer_name}</div> : null}
+          </div>
+          <div className="barcode-value">
+            <code>{order.barcode}</code>
+          </div>
+          <div className="barcode-stripes" aria-hidden>
+            {order.barcode?.split("").map((ch: string, i: number) => (
+              <span key={i} style={{ height: 8 + (ch.charCodeAt(0) % 24) }} />
+            ))}
+          </div>
+          <p className="hint">把此页打印贴在工位上，员工用扫码枪扫上方条码即可报工。</p>
+        </div>
+        <div className="row-actions">
+          <button className="primary" onClick={() => window.print()}><Printer size={16} /> 打印</button>
+          <button className="secondary" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Piece({ entries = [], employees = [], orders = [], processes = [], token, onDone }: { entries?: Row[]; employees?: Row[]; orders?: Row[]; processes?: Row[]; token: string; onDone: () => void }) {
+  const [form, setForm] = useState({ entry_date: new Date().toISOString().slice(0, 10), order_no: "", barcode: "", process_name: "", employee_id: "", quantity: 0 });
+  const barcodeRef = useRef<HTMLInputElement | null>(null);
+  const qtyRef = useRef<HTMLInputElement | null>(null);
+
+  // 优先按 barcode 找工单
+  const order = useMemo(() => {
+    if (form.barcode) {
+      const hit = orders.find((o) => o.barcode === form.barcode);
+      if (hit) return hit;
+    }
+    return orders.find((o) => o.order_no === form.order_no);
+  }, [form.barcode, form.order_no, orders]);
+
+  const processOptions = useMemo(() => {
+    if (order?.flow && order.flow.length > 0) {
+      return (order.flow as Row[]).map((f) => [f.name, `${f.name} ¥${f.price}`]);
+    }
+    return processes.map((p) => [p.name, p.name]);
+  }, [order, processes]);
+
+  // 扫码后自动定位工序列表 & 聚焦数量
+  useEffect(() => {
+    if (form.barcode && order && !form.process_name) {
+      const first = (order.flow || [])[0];
+      if (first) setForm((prev) => ({ ...prev, process_name: first.name }));
+    }
+    if (form.barcode && order) {
+      setTimeout(() => qtyRef.current?.focus(), 50);
+    }
+  }, [form.barcode, order]);
+
+  async function lookupBarcode() {
+    if (!form.barcode) return;
+    try {
+      const found = await api<Row>(`/work-orders/by-barcode/${encodeURIComponent(form.barcode)}`, {}, token);
+      if (found && found.order_no) {
+        setForm((prev) => ({ ...prev, order_no: found.order_no, process_name: (found.flow || [])[0]?.name || "" }));
+      }
+    } catch (err) {
+      // 后端没找到时给个提示
+      setError("条码未找到，请检查");
+    }
   }
-  return <div className="grid"><section className="panel span-4"><div className="section-head"><h2>每日计件录入</h2></div><div className="form one"><Input label="日期" type="date" value={form.entry_date} onChange={(v) => setForm({ ...form, entry_date: v })} /><Select label="工单号" value={form.order_no} onChange={(v) => setForm({ ...form, order_no: v, process_name: "" })} options={orders.map((o) => [o.order_no, o.order_no])} /><Select label="工序" value={form.process_name} onChange={(v) => setForm({ ...form, process_name: v })} options={processOptions} /><Select label="员工" value={form.employee_id} onChange={(v) => setForm({ ...form, employee_id: v })} options={employees.map((e) => [e.id, `${e.name} ${e.position}`])} /><Input label="数量" type="number" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: Number(v) })} /><button className="primary" onClick={submit}><Save size={17} /> 录入</button></div></section><Table title="计件记录 / 工资统计" rows={entries} cols={[["entry_date", "日期"], ["order_no", "工单"], ["process_name", "工序"], ["employee_name", "员工"], ["quantity", "数量"], ["unit_price", "单价"], ["wage", "工资"]]} span="span-8" /></div>;
+
+  function reset() {
+    setForm({ entry_date: new Date().toISOString().slice(0, 10), order_no: "", barcode: "", process_name: "", employee_id: "", quantity: 0 });
+    setTimeout(() => barcodeRef.current?.focus(), 50);
+  }
+
+  async function submit() {
+    if (!form.order_no && !form.barcode) {
+      setError("请扫码或选择工单");
+      return;
+    }
+    try {
+      await api("/piece-entries", {
+        method: "POST",
+        body: JSON.stringify({
+          entry_date: form.entry_date,
+          order_no: form.order_no || undefined,
+          barcode: form.barcode || undefined,
+          process_name: form.process_name,
+          employee_id: Number(form.employee_id),
+          quantity: Number(form.quantity),
+        }),
+      }, token);
+      reset();
+      onDone();
+    } catch (err: any) {
+      setError(err.message || "提交失败");
+    }
+  }
+
+  function setError(msg: string) {
+    // 行内提示用 form.suggestion 替代
+    alert(msg);
+  }
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head">
+          <h2><ScanLine size={18} /> 扫码报工</h2>
+          <span className="status">支持扫码枪 + 手工</span>
+        </div>
+        <div className="form one">
+          <Input label="日期" type="date" value={form.entry_date} onChange={(v) => setForm({ ...form, entry_date: v })} />
+          <div className="field">
+            <label>扫码 (条码)</label>
+            <input
+              ref={barcodeRef}
+              autoFocus
+              value={form.barcode}
+              placeholder="扫码枪扫描, 或手动输入条码"
+              onChange={(e) => setForm({ ...form, barcode: e.target.value.trim() })}
+              onBlur={lookupBarcode}
+              onKeyDown={(e) => { if (e.key === "Enter") lookupBarcode(); }}
+            />
+          </div>
+          <div className="field">
+            <label>或选工单</label>
+            <select value={form.order_no} onChange={(e) => setForm({ ...form, order_no: e.target.value, barcode: "" })}>
+              <option value="">请选择工单</option>
+              {orders.filter((o) => o.status !== "已完成").map((o) => <option value={o.order_no} key={o.order_no}>{o.order_no} · {o.product_name}</option>)}
+            </select>
+          </div>
+          {order ? (
+            <div className="hint">
+              当前工单：<strong>{order.product_name}</strong> · 已完成 {order.completed_quantity}/{order.quantity}
+            </div>
+          ) : (
+            <div className="hint">请先扫条码或选择工单</div>
+          )}
+          <Select label="工序" value={form.process_name} onChange={(v) => setForm({ ...form, process_name: v })} options={processOptions} />
+          <Select label="员工" value={form.employee_id} onChange={(v) => setForm({ ...form, employee_id: v })} options={employees.map((e) => [e.id, `${e.name} ${e.position}`])} />
+          <div className="field">
+            <label>数量</label>
+            <input
+              ref={qtyRef}
+              type="number"
+              value={form.quantity}
+              onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            />
+          </div>
+          <button className="primary" onClick={submit}><Save size={17} /> 录入</button>
+        </div>
+      </section>
+      <Table title="计件记录 / 工资统计" rows={entries} cols={[["entry_date", "日期"], ["order_no", "工单"], ["process_name", "工序"], ["employee_name", "员工"], ["quantity", "数量"], ["unit_price", "单价"], ["wage", "工资"]]} span="span-8" />
+    </div>
+  );
 }
 
 function Input({ label, value, onChange, type = "text", placeholder = "" }: { label: string; value: any; onChange: (value: string) => void; type?: string; placeholder?: string }) {

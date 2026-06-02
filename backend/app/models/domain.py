@@ -114,6 +114,10 @@ class WorkOrder(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
     order_no: Mapped[str] = mapped_column(String(80), index=True)
+    barcode: Mapped[str] = mapped_column(String(80), index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(120), default="")
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     quantity: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(30), default="进行中")
@@ -123,6 +127,31 @@ class WorkOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     product: Mapped[Product] = relationship()
+
+
+class WorkOrderProcessProgress(Base):
+    """工单每道工序的实时进度（V2 工序追踪用）.
+
+    一次计件录入即代表对应工序出量。
+    - 工序完成量 >= 工单数量时, status = 'done' (看板显示 ✓)
+    - 否则 status = 'in_progress' (看板显示 ✗ / 进行中)
+    """
+
+    __tablename__ = "work_order_process_progress"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    work_order_id: Mapped[int] = mapped_column(ForeignKey("work_orders.id"), index=True)
+    process_name: Mapped[str] = mapped_column(String(80))
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    quantity_done: Mapped[float] = mapped_column(Float, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending / in_progress / done
+    last_employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
+    last_employee_name: Mapped[str] = mapped_column(String(80), default="")
+    last_entry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (UniqueConstraint("work_order_id", "process_name"),)
 
 
 class PieceEntry(Base):

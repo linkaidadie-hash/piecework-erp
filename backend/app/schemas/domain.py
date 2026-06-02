@@ -30,6 +30,11 @@ class EmployeeIn(BaseModel):
 class ProcessIn(BaseModel):
     name: str
     default_price: float = 0
+    sort_order: int | None = None
+
+
+class ProcessReorderIn(BaseModel):
+    process_ids: list[int]
 
 
 class ProductIn(BaseModel):
@@ -66,11 +71,26 @@ class WorkOrderIn(BaseModel):
     quantity: float
     flow: list[dict[str, Any]]
     materials: list[dict[str, Any]] = []
+    customer_name: str = ""
+    deadline: date | None = None
+    notes: str = ""
+    barcode: str | None = None  # 留空时由后端自动生成
+
+
+class WorkOrderProgressOut(BaseModel):
+    id: int
+    process_name: str
+    sort_order: int
+    quantity_done: float
+    status: str
+    last_employee_name: str
+    last_entry_at: str | None = None
 
 
 class PieceEntryIn(BaseModel):
     entry_date: date
-    order_no: str
+    order_no: str | None = None  # 工单号 / 条码二选一
+    barcode: str | None = None  # V2 扫码报工：直接传扫码枪读到的条码
     process_name: str
     employee_id: int
     quantity: float
