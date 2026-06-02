@@ -81,6 +81,14 @@ class PieceEntryIn(BaseModel):
     quantity: float = Field(gt=0)
 
 
+class ScanWorkOrderIn(BaseModel):
+    barcode: str
+    employee_id: int
+    process_name: str
+    quantity: float = Field(default=1, gt=0)
+    entry_date: date | None = None
+
+
 class InventoryTxnQuery(BaseModel):
     item_type: Literal["material", "finished"] | None = None
     limit: int = Field(default=100, ge=1, le=500)

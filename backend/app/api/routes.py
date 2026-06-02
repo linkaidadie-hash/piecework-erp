@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.license import license_status, require_valid_license, verify_license_data, write_license
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db import get_db
-from app.models import Employee, FinishedGood, InventoryTxn, Material, PieceEntry, Process, Product, Role, Tenant, User, WorkOrder
+from app.models import Employee, FinishedGood, InventoryTxn, Material, PieceEntry, Process, Product, Role, ScanRecord, Tenant, User, WorkOrder
 from app.schemas import (
     BootstrapOut,
     EmployeeIn,
@@ -22,6 +22,7 @@ from app.schemas import (
     ProcessIn,
     ProcessReorderIn,
     ProductIn,
+    ScanWorkOrderIn,
     TokenOut,
     WorkOrderIn,
 )
@@ -53,6 +54,10 @@ def ensure_sort_order_column(db: Session):
             db.commit()
 
 
+def ensure_scan_records_table(db: Session):
+    ScanRecord.__table__.create(bind=db.get_bind(), checkfirst=True)
+
+
 def ensure_non_negative_stock(current_stock: float, quantity: float, item_name: str):
     if current_stock - quantity < 0:
         raise HTTPException(status_code=400, detail=f"{item_name}库存不足")
@@ -63,6 +68,45 @@ def get_tenant_product(db: Session, tenant_id: int, product_id: int) -> Product:
     if not product or product.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="产品不存在")
     return product
+
+
+def create_piece_entry_from_values(
+    db: Session,
+    tenant_id: int,
+    order: WorkOrder,
+    emp: Employee,
+    process_name: str,
+    quantity: float,
+    entry_date: date,
+) -> tuple[PieceEntry, float, float]:
+    if not emp.active:
+        raise HTTPException(status_code=400, detail="员工已停用，不能录入计件")
+    if order.status == "已完成":
+        raise HTTPException(status_code=400, detail="工单已完工，不能继续录入")
+    flow = json.loads(order.flow or "[]")
+    process = next((x for x in flow if x.get("name") == process_name), None)
+    if flow and not process:
+        raise HTTPException(status_code=400, detail="工序不在当前工单流程中")
+    unit_price = float(process.get("price", 0)) if process else emp.piece_rate
+    wage = quantity * unit_price
+    obj = PieceEntry(tenant_id=tenant_id, work_order_id=order.id, process_name=process_name, employee_id=emp.id, quantity=quantity, unit_price=unit_price, wage=wage, entry_date=entry_date)
+    is_final_process = bool(flow) and process_name == flow[-1].get("name")
+    if is_final_process:
+        remaining_quantity = order.quantity - order.completed_quantity
+        if remaining_quantity <= 0:
+            raise HTTPException(status_code=400, detail="工单已完工，不能继续录入末工序")
+        if quantity > remaining_quantity:
+            raise HTTPException(status_code=400, detail=f"录入数量不能超过剩余数量 {remaining_quantity:g}")
+        order.completed_quantity += quantity
+        if order.completed_quantity >= order.quantity:
+            order.status = "已完成"
+        fg = db.scalar(select(FinishedGood).where(FinishedGood.tenant_id == tenant_id, FinishedGood.product_id == order.product_id))
+        if not fg:
+            fg = FinishedGood(tenant_id=tenant_id, product_id=order.product_id, stock=0)
+            db.add(fg)
+        fg.stock += quantity
+        db.add(InventoryTxn(tenant_id=tenant_id, item_type="finished", item_id=order.product_id, direction="in", quantity=quantity, reason=f"工单 {order.order_no} 完工入库"))
+    return obj, unit_price, wage
 
 
 @router.post("/bootstrap", response_model=BootstrapOut)
@@ -388,37 +432,53 @@ def create_piece_entry(payload: PieceEntryIn, user: User = Depends(get_current_u
     emp = db.get(Employee, payload.employee_id)
     if not order or not emp or emp.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="工单或员工不存在")
-    if not emp.active:
-        raise HTTPException(status_code=400, detail="员工已停用，不能录入计件")
-    if order.status == "已完成":
-        raise HTTPException(status_code=400, detail="工单已完工，不能继续录入")
-    flow = json.loads(order.flow or "[]")
-    process = next((x for x in flow if x.get("name") == payload.process_name), None)
-    if flow and not process:
-        raise HTTPException(status_code=400, detail="工序不在当前工单流程中")
-    unit_price = float(process.get("price", 0)) if process else emp.piece_rate
-    wage = payload.quantity * unit_price
-    obj = PieceEntry(tenant_id=user.tenant_id, work_order_id=order.id, process_name=payload.process_name, employee_id=emp.id, quantity=payload.quantity, unit_price=unit_price, wage=wage, entry_date=payload.entry_date)
-    is_final_process = bool(flow) and payload.process_name == flow[-1].get("name")
-    if is_final_process:
-        remaining_quantity = order.quantity - order.completed_quantity
-        if remaining_quantity <= 0:
-            raise HTTPException(status_code=400, detail="工单已完工，不能继续录入末工序")
-        if payload.quantity > remaining_quantity:
-            raise HTTPException(status_code=400, detail=f"录入数量不能超过剩余数量 {remaining_quantity:g}")
-        order.completed_quantity += payload.quantity
-        if order.completed_quantity >= order.quantity:
-            order.status = "已完成"
-        fg = db.scalar(select(FinishedGood).where(FinishedGood.tenant_id == user.tenant_id, FinishedGood.product_id == order.product_id))
-        if not fg:
-            fg = FinishedGood(tenant_id=user.tenant_id, product_id=order.product_id, stock=0)
-            db.add(fg)
-        fg.stock += payload.quantity
-        db.add(InventoryTxn(tenant_id=user.tenant_id, item_type="finished", item_id=order.product_id, direction="in", quantity=payload.quantity, reason=f"工单 {order.order_no} 完工入库"))
+    obj, _, _ = create_piece_entry_from_values(db, user.tenant_id, order, emp, payload.process_name, payload.quantity, payload.entry_date)
     db.add(obj)
     db.commit()
     db.refresh(obj)
     return model_dict(obj, {"employee_name": emp.name, "order_no": order.order_no})
+
+
+@router.get("/scan-records")
+def list_scan_records(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_scan_records_table(db)
+    records = db.scalars(select(ScanRecord).where(ScanRecord.tenant_id == user.tenant_id).order_by(ScanRecord.created_at.desc(), ScanRecord.id.desc()).limit(200)).all()
+    return [
+        model_dict(record, {
+            "employee_name": record.employee.name if record.employee else "",
+            "order_no": record.work_order.order_no if record.work_order else record.barcode,
+        })
+        for record in records
+    ]
+
+
+@router.post("/work-orders/scan")
+def scan_work_order(payload: ScanWorkOrderIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_scan_records_table(db)
+    barcode = payload.barcode.strip()
+    emp = db.get(Employee, payload.employee_id)
+    if not emp or emp.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="员工不存在")
+    order = db.scalar(select(WorkOrder).where(WorkOrder.tenant_id == user.tenant_id, WorkOrder.order_no == barcode))
+    if not order:
+        record = ScanRecord(tenant_id=user.tenant_id, barcode=barcode, employee_id=emp.id, result="error", message="工单不存在")
+        db.add(record)
+        db.commit()
+        return model_dict(record, {"ok": False, "order_no": barcode, "employee_name": emp.name})
+    try:
+        obj, unit_price, wage = create_piece_entry_from_values(db, user.tenant_id, order, emp, payload.process_name, payload.quantity, payload.entry_date or date.today())
+    except HTTPException as exc:
+        record = ScanRecord(tenant_id=user.tenant_id, barcode=barcode, employee_id=emp.id, work_order_id=order.id, process_name=payload.process_name, quantity=payload.quantity, result="error", message=str(exc.detail))
+        db.add(record)
+        db.commit()
+        return model_dict(record, {"ok": False, "order_no": order.order_no, "employee_name": emp.name})
+    db.add(obj)
+    db.flush()
+    record = ScanRecord(tenant_id=user.tenant_id, barcode=barcode, employee_id=emp.id, work_order_id=order.id, process_name=payload.process_name, quantity=payload.quantity, wage=wage, result="success", message="扫码报工成功")
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return model_dict(record, {"ok": True, "order_no": order.order_no, "employee_name": emp.name, "unit_price": unit_price})
 
 
 @router.get("/wages/summary")

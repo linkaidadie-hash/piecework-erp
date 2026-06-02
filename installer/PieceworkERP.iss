@@ -1,5 +1,5 @@
 #define MyAppName "计件生产管理系统"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "Piecework ERP"
 #define MyAppExeName "piecework-erp.exe"
 

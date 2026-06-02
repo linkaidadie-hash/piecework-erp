@@ -141,3 +141,22 @@ class PieceEntry(Base):
 
     employee: Mapped[Employee] = relationship()
     work_order: Mapped[WorkOrder] = relationship()
+
+
+class ScanRecord(Base):
+    __tablename__ = "scan_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    barcode: Mapped[str] = mapped_column(String(120), index=True)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
+    work_order_id: Mapped[int | None] = mapped_column(ForeignKey("work_orders.id"), nullable=True)
+    process_name: Mapped[str] = mapped_column(String(80), default="")
+    quantity: Mapped[float] = mapped_column(Float, default=0)
+    wage: Mapped[float] = mapped_column(Float, default=0)
+    result: Mapped[str] = mapped_column(String(20), default="success")
+    message: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    employee: Mapped[Employee | None] = relationship()
+    work_order: Mapped[WorkOrder | None] = relationship()

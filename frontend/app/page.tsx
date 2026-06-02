@@ -22,6 +22,7 @@ const tabs = [
   ["finished", "成品", Package],
   ["inventory", "流水", ClipboardList],
   ["orders", "工单", ClipboardList],
+  ["scan", "扫码", ClipboardList],
   ["piece", "计件", FileText],
   ["wages", "工资", FileText],
   ["license", "授权", ShieldCheck],
@@ -40,7 +41,7 @@ export default function Home() {
 
   async function refresh(token = session?.token) {
     if (!token) return;
-    const [dashboard, employees, processes, products, materials, finished, txns, orders, entries, wages] = await Promise.all([
+    const [dashboard, employees, processes, products, materials, finished, txns, orders, entries, scanRecords, wages] = await Promise.all([
       api<Row>("/dashboard", {}, token),
       api<Row[]>("/employees", {}, token),
       api<Row[]>("/processes", {}, token),
@@ -50,9 +51,10 @@ export default function Home() {
       api<Row[]>("/inventory-txns", {}, token),
       api<Row[]>("/work-orders", {}, token),
       api<Row[]>("/piece-entries", {}, token),
+      api<Row[]>("/scan-records", {}, token),
       api<Row>("/wages/summary", {}, token),
     ]);
-    setData({ dashboard, employees, processes, products, materials, finished, txns, orders, entries, wages });
+    setData({ dashboard, employees, processes, products, materials, finished, txns, orders, entries, scanRecords, wages });
   }
 
   useEffect(() => {
@@ -92,6 +94,7 @@ export default function Home() {
         {active === "finished" && <Finished rows={data.finished as Row[]} products={data.products as Row[]} token={session.token} onDone={refresh} />}
         {active === "inventory" && <InventoryTxns rows={data.txns as Row[]} />}
         {active === "orders" && <Orders rows={data.orders as Row[]} products={data.products as Row[]} materials={data.materials as Row[]} token={session.token} onDone={refresh} />}
+        {active === "scan" && <ScanReport rows={data.scanRecords as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} token={session.token} onDone={refresh} />}
         {active === "piece" && <Piece entries={data.entries as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} token={session.token} onDone={refresh} />}
         {active === "wages" && <Wages initial={data.wages as Row} token={session.token} />}
         {active === "license" && <LicenseManager />}
@@ -638,6 +641,72 @@ function Orders({ rows = [], products = [], materials = [], token, onDone }: { r
   );
 }
 
+function ScanReport({ rows = [], employees = [], orders = [], token, onDone }: { rows?: Row[]; employees?: Row[]; orders?: Row[]; token: string; onDone: () => void }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [form, setForm] = useState({ barcode: "", employee_id: "", process_name: "", quantity: 1, entry_date: today });
+  const [message, setMessage] = useState("");
+  const [result, setResult] = useState<Row | null>(null);
+  const order = orders.find((item) => item.order_no === form.barcode);
+  const processOptions = useMemo(() => (order?.flow || []).map((item: Row) => [item.name, `${item.name} ¥${money(item.price)}`]), [order]);
+
+  async function submit() {
+    setMessage("");
+    setResult(null);
+    try {
+      const res = await api<Row>("/work-orders/scan", { method: "POST", body: JSON.stringify({ ...form, employee_id: Number(form.employee_id), quantity: Number(form.quantity || 1) }) }, token);
+      setResult(res);
+      setMessage(res.ok ? "扫码报工成功" : res.message || "扫码失败");
+      setForm({ ...form, barcode: "", quantity: 1 });
+      onDone();
+    } catch (err: any) {
+      setMessage(err.message);
+    }
+  }
+
+  function onBarcode(value: string) {
+    const nextOrder = orders.find((item) => item.order_no === value);
+    const firstProcess = nextOrder?.flow?.[0]?.name || form.process_name;
+    setForm({ ...form, barcode: value, process_name: firstProcess });
+  }
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>扫码报工</h2><span className="status">扫码枪/手输都可用</span></div>
+        <div className="form one">
+          <Select label="员工" value={form.employee_id} onChange={(v) => setForm({ ...form, employee_id: v })} options={employees.filter((item) => item.active).map((item) => [item.id, `${item.name} ${item.employee_no}`])} />
+          <Input label="工单条码" value={form.barcode} placeholder="扫码或输入工单号后回车" onChange={onBarcode} onEnter={submit} autoFocus />
+          <Select label="工序" value={form.process_name} onChange={(v) => setForm({ ...form, process_name: v })} options={processOptions} />
+          <Input label="数量" type="number" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: Number(v) })} />
+          <Input label="日期" type="date" value={form.entry_date} onChange={(v) => setForm({ ...form, entry_date: v })} />
+          <button className="primary" onClick={submit}><Save size={17} /> 提交报工</button>
+          {message && <p className={result?.ok ? "success" : "error"}>{message}</p>}
+        </div>
+      </section>
+      <section className="panel span-8">
+        <div className="section-head"><h2>扫码记录</h2><span className="status">最近 200 条</span></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>结果</th><th>工单</th><th>员工</th><th>工序</th><th>数量</th><th>工资</th><th>消息</th></tr></thead>
+            <tbody>{rows.map((row) => (
+              <tr key={row.id}>
+                <td>{String(row.created_at || "")}</td>
+                <td>{row.result === "success" ? "成功" : "失败"}</td>
+                <td>{row.order_no || row.barcode}</td>
+                <td>{row.employee_name}</td>
+                <td>{row.process_name}</td>
+                <td>{row.quantity}</td>
+                <td>{money(row.wage)}</td>
+                <td>{row.message}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function Piece({ entries = [], employees = [], orders = [], token, onDone }: { entries?: Row[]; employees?: Row[]; orders?: Row[]; token: string; onDone: () => void }) {
   const [form, setForm] = useState({ entry_date: new Date().toISOString().slice(0, 10), order_no: "", process_name: "", employee_id: "", quantity: 0 });
   const order = orders.find((o) => o.order_no === form.order_no);
@@ -649,8 +718,8 @@ function Piece({ entries = [], employees = [], orders = [], token, onDone }: { e
   return <div className="grid"><section className="panel span-4"><div className="section-head"><h2>每日计件录入</h2></div><div className="form one"><Input label="日期" type="date" value={form.entry_date} onChange={(v) => setForm({ ...form, entry_date: v })} /><Select label="工单号" value={form.order_no} onChange={(v) => setForm({ ...form, order_no: v, process_name: "" })} options={orders.map((o) => [o.order_no, o.order_no])} /><Select label="工序" value={form.process_name} onChange={(v) => setForm({ ...form, process_name: v })} options={processOptions} /><Select label="员工" value={form.employee_id} onChange={(v) => setForm({ ...form, employee_id: v })} options={employees.map((e) => [e.id, `${e.name} ${e.position}`])} /><Input label="数量" type="number" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: Number(v) })} /><button className="primary" onClick={submit}><Save size={17} /> 录入</button></div></section><Table title="计件记录 / 工资统计" rows={entries} cols={[["entry_date", "日期"], ["order_no", "工单"], ["process_name", "工序"], ["employee_name", "员工"], ["quantity", "数量"], ["unit_price", "单价"], ["wage", "工资"]]} span="span-8" /></div>;
 }
 
-function Input({ label, value, onChange, type = "text", placeholder = "" }: { label: string; value: any; onChange: (value: string) => void; type?: string; placeholder?: string }) {
-  return <div className="field"><label>{label}</label><input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} /></div>;
+function Input({ label, value, onChange, type = "text", placeholder = "", onEnter, autoFocus = false }: { label: string; value: any; onChange: (value: string) => void; type?: string; placeholder?: string; onEnter?: () => void; autoFocus?: boolean }) {
+  return <div className="field"><label>{label}</label><input type={type} value={value} placeholder={placeholder} autoFocus={autoFocus} onKeyDown={(e) => { if (e.key === "Enter") onEnter?.(); }} onChange={(e) => onChange(e.target.value)} /></div>;
 }
 
 function Select({ label, value, onChange, options }: { label: string; value: any; onChange: (value: string) => void; options: any[][] }) {
