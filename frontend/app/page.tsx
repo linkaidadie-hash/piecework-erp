@@ -20,8 +20,10 @@ const tabs = [
   ["products", "产品", Package],
   ["materials", "原料", Boxes],
   ["finished", "成品", Package],
+  ["inventory", "流水", ClipboardList],
   ["orders", "工单", ClipboardList],
   ["piece", "计件", FileText],
+  ["wages", "工资", FileText],
   ["license", "授权", ShieldCheck],
 ] as const;
 
@@ -38,17 +40,19 @@ export default function Home() {
 
   async function refresh(token = session?.token) {
     if (!token) return;
-    const [dashboard, employees, processes, products, materials, finished, orders, entries] = await Promise.all([
+    const [dashboard, employees, processes, products, materials, finished, txns, orders, entries, wages] = await Promise.all([
       api<Row>("/dashboard", {}, token),
       api<Row[]>("/employees", {}, token),
       api<Row[]>("/processes", {}, token),
       api<Row[]>("/products", {}, token),
       api<Row[]>("/materials", {}, token),
       api<Row[]>("/finished-goods", {}, token),
+      api<Row[]>("/inventory-txns", {}, token),
       api<Row[]>("/work-orders", {}, token),
       api<Row[]>("/piece-entries", {}, token),
+      api<Row>("/wages/summary", {}, token),
     ]);
-    setData({ dashboard, employees, processes, products, materials, finished, orders, entries });
+    setData({ dashboard, employees, processes, products, materials, finished, txns, orders, entries, wages });
   }
 
   useEffect(() => {
@@ -86,8 +90,10 @@ export default function Home() {
         {active === "products" && <Products rows={data.products as Row[]} processes={data.processes as Row[]} token={session.token} onDone={refresh} />}
         {active === "materials" && <Materials rows={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "finished" && <Finished rows={data.finished as Row[]} products={data.products as Row[]} token={session.token} onDone={refresh} />}
+        {active === "inventory" && <InventoryTxns rows={data.txns as Row[]} />}
         {active === "orders" && <Orders rows={data.orders as Row[]} products={data.products as Row[]} materials={data.materials as Row[]} token={session.token} onDone={refresh} />}
         {active === "piece" && <Piece entries={data.entries as Row[]} employees={data.employees as Row[]} orders={data.orders as Row[]} token={session.token} onDone={refresh} />}
+        {active === "wages" && <Wages initial={data.wages as Row} token={session.token} />}
         {active === "license" && <LicenseManager />}
       </main>
     </div>
@@ -110,11 +116,21 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   async function submit() {
     setError("");
     try {
-      await api("/bootstrap", { method: "POST", body: "{}" });
       const device_key = localStorage.getItem("erp-device") || crypto.randomUUID();
       localStorage.setItem("erp-device", device_key);
       const res = await api<{ access_token: string; company: string; role: string }>("/login", { method: "POST", body: JSON.stringify({ ...form, device_key }) });
       onLogin({ token: res.access_token, company: res.company, role: res.role });
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  async function initDemo() {
+    setError("");
+    try {
+      const demo = await api<{ company: string; username: string; password: string; auth_code: string }>("/bootstrap", { method: "POST", body: "{}" });
+      setForm({ company: demo.company, username: demo.username, password: demo.password, auth_code: demo.auth_code });
+      setError("演示数据已初始化，请点击登录。");
     } catch (err: any) {
       setError(err.message);
     }
@@ -149,6 +165,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
             </div>
           ))}
           <button className="primary" onClick={submit}><LogOut size={17} /> 登录</button>
+          <button className="secondary" onClick={initDemo}>初始化演示数据</button>
         </div>
         {error && <p className="error">{error}</p>}
       </div>
@@ -433,7 +450,46 @@ function Products({ rows = [], processes = [], token, onDone }: { rows?: Row[]; 
 }
 
 function Materials({ rows = [], token, onDone }: { rows?: Row[]; token: string; onDone: () => void }) {
-  return <Crud title="原材料库存" rows={rows} token={token} path="/materials" fields={[["name", "原料名称"], ["unit", "单位"], ["stock", "当前库存", "number"], ["min_stock", "预警线", "number"]]} onDone={onDone} />;
+  const empty = { name: "", unit: "kg", stock: 0, min_stock: 0 };
+  const [form, setForm] = useState<Row>(empty);
+  const [txn, setTxn] = useState({ material_id: "", direction: "in", quantity: 0, reason: "采购入库" });
+
+  async function create() {
+    await api("/materials", { method: "POST", body: JSON.stringify(form) }, token);
+    setForm(empty);
+    onDone();
+  }
+
+  async function saveTxn() {
+    await api("/materials/txn", { method: "POST", body: JSON.stringify({ ...txn, material_id: Number(txn.material_id) }) }, token);
+    onDone();
+  }
+
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>新增原料</h2></div>
+        <div className="form one">
+          <Input label="原料名称" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
+          <Input label="单位" value={form.unit} onChange={(v) => setForm({ ...form, unit: v })} />
+          <Input label="当前库存" type="number" value={form.stock} onChange={(v) => setForm({ ...form, stock: Number(v) })} />
+          <Input label="预警线" type="number" value={form.min_stock} onChange={(v) => setForm({ ...form, min_stock: Number(v) })} />
+          <button className="primary" onClick={create}><Save size={17} /> 保存</button>
+        </div>
+      </section>
+      <section className="panel span-4">
+        <div className="section-head"><h2>原料出入库</h2></div>
+        <div className="form one">
+          <Select label="原料" value={txn.material_id} onChange={(v) => setTxn({ ...txn, material_id: v })} options={rows.map((row) => [row.id, row.name])} />
+          <Select label="方向" value={txn.direction} onChange={(v) => setTxn({ ...txn, direction: v, reason: v === "in" ? "采购入库" : "领料出库" })} options={[["in", "入库"], ["out", "出库"]]} />
+          <Input label="数量" type="number" value={txn.quantity} onChange={(v) => setTxn({ ...txn, quantity: Number(v) })} />
+          <Input label="原因" value={txn.reason} onChange={(v) => setTxn({ ...txn, reason: v })} />
+          <button className="primary" onClick={saveTxn}><Save size={17} /> 保存</button>
+        </div>
+      </section>
+      <Table title="原材料库存" rows={rows} cols={[["name", "原料名称"], ["unit", "单位"], ["stock", "当前库存"], ["min_stock", "预警线"]]} span="span-4" />
+    </div>
+  );
 }
 
 function Finished({ rows = [], products = [], token, onDone }: { rows?: Row[]; products?: Row[]; token: string; onDone: () => void }) {
@@ -443,6 +499,83 @@ function Finished({ rows = [], products = [], token, onDone }: { rows?: Row[]; p
     onDone();
   }
   return <div className="grid"><section className="panel span-4"><div className="section-head"><h2>成品出入库</h2></div><div className="form one"><Select label="产品" value={form.product_id} onChange={(v) => setForm({ ...form, product_id: v })} options={products.map((p) => [p.id, p.name])} /><Select label="方向" value={form.direction} onChange={(v) => setForm({ ...form, direction: v })} options={[["in", "入库"], ["out", "出货"]]} /><Input label="数量" type="number" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: Number(v) })} /><Input label="原因" value={form.reason} onChange={(v) => setForm({ ...form, reason: v })} /><button className="primary" onClick={submit}><Save size={17} /> 保存</button></div></section><Table title="成品库存" rows={rows} cols={[["product_name", "产品"], ["spec", "规格"], ["stock", "库存"], ["unit", "单位"]]} span="span-8" /></div>;
+}
+
+function InventoryTxns({ rows = [] }: { rows?: Row[] }) {
+  const [type, setType] = useState("");
+
+  return (
+    <div className="grid">
+      <section className="panel span-12">
+        <div className="section-head">
+          <h2>库存流水</h2>
+          <div className="row-actions">
+            <button className={`secondary ${type === "" ? "active" : ""}`} onClick={() => setType("")}>全部</button>
+            <button className={`secondary ${type === "material" ? "active" : ""}`} onClick={() => setType("material")}>原料</button>
+            <button className={`secondary ${type === "finished" ? "active" : ""}`} onClick={() => setType("finished")}>成品</button>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>类型</th><th>物品</th><th>方向</th><th>数量</th><th>原因</th></tr></thead>
+            <tbody>{rows.filter((row) => !type || row.item_type === type).map((row) => (
+              <tr key={row.id}>
+                <td>{String(row.created_at || "")}</td>
+                <td>{row.item_type === "material" ? "原料" : "成品"}</td>
+                <td>{row.item_name}</td>
+                <td>{row.direction === "in" ? "入库" : "出库"}</td>
+                <td>{row.quantity}</td>
+                <td>{row.reason}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Wages({ initial = {}, token }: { initial?: Row; token: string }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthStart = today.slice(0, 8) + "01";
+  const [range, setRange] = useState({ start_date: monthStart, end_date: today });
+  const [summary, setSummary] = useState<Row>(initial || {});
+
+  useEffect(() => {
+    setSummary(initial || {});
+  }, [initial]);
+
+  async function search() {
+    const params = new URLSearchParams();
+    if (range.start_date) params.set("start_date", range.start_date);
+    if (range.end_date) params.set("end_date", range.end_date);
+    setSummary(await api<Row>(`/wages/summary?${params.toString()}`, {}, token));
+  }
+
+  const rows = (summary.rows || []) as Row[];
+  return (
+    <div className="grid">
+      <section className="panel span-4">
+        <div className="section-head"><h2>工资汇总</h2></div>
+        <div className="form one">
+          <Input label="开始日期" type="date" value={range.start_date} onChange={(v) => setRange({ ...range, start_date: v })} />
+          <Input label="结束日期" type="date" value={range.end_date} onChange={(v) => setRange({ ...range, end_date: v })} />
+          <button className="primary" onClick={search}><FileText size={17} /> 查询</button>
+        </div>
+      </section>
+      <section className="panel metric span-4">
+        <div className="metric-label">汇总产量</div>
+        <div className="metric-value">{summary.total_quantity || 0}</div>
+        <div className="metric-sub">按计件记录统计</div>
+      </section>
+      <section className="panel metric span-4">
+        <div className="metric-label">应发工资</div>
+        <div className="metric-value">¥ {money(summary.total_wage)}</div>
+        <div className="metric-sub">按员工计件单价计算</div>
+      </section>
+      <Table title="员工工资明细" rows={rows} cols={[["employee_name", "员工"], ["quantity", "产量"], ["wage", "工资"]]} span="span-12" />
+    </div>
+  );
 }
 
 function Orders({ rows = [], products = [], materials = [], token, onDone }: { rows?: Row[]; products?: Row[]; materials?: Row[]; token: string; onDone: () => void }) {

@@ -1,7 +1,7 @@
 import json
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -39,6 +39,16 @@ def ensure_sort_order_column(db: Session):
     if db.bind and db.bind.dialect.name == "sqlite":
         columns = [row[1] for row in db.execute(text("PRAGMA table_info(processes)")).all()]
         if "sort_order" not in columns:
+            db.execute(text("ALTER TABLE processes ADD COLUMN sort_order INTEGER DEFAULT 0"))
+            db.commit()
+    elif db.bind and db.bind.dialect.name == "postgresql":
+        exists = db.scalar(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'processes' AND column_name = 'sort_order'"
+            )
+        )
+        if not exists:
             db.execute(text("ALTER TABLE processes ADD COLUMN sort_order INTEGER DEFAULT 0"))
             db.commit()
 
@@ -84,14 +94,6 @@ def bootstrap(db: Session = Depends(get_db)):
                 Product(tenant_id=tenant.id, name="演示产品", spec="标准款", unit="件", default_flow=json.dumps([{"name": "裁剪", "price": 0.08}, {"name": "车缝", "price": 0.18}, {"name": "包装", "price": 0.05}], ensure_ascii=False)),
             ]
         )
-        db.commit()
-    else:
-        admin = db.scalar(select(User).where(User.tenant_id == tenant.id, User.username == username))
-        if not admin:
-            db.add(User(tenant_id=tenant.id, username=username, password_hash=hash_password(password), role=Role.admin))
-        else:
-            admin.password_hash = hash_password(password)
-            admin.device_key = None
         db.commit()
     return BootstrapOut(company=company, username=username, password=password, auth_code=auth_code)
 
@@ -274,6 +276,34 @@ def material_txn(payload: MaterialTxnIn, user: User = Depends(get_current_user),
     return model_dict(mat)
 
 
+@router.get("/inventory-txns")
+def list_inventory_txns(
+    item_type: str | None = Query(default=None, pattern="^(material|finished)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    stmt = select(InventoryTxn).where(InventoryTxn.tenant_id == user.tenant_id)
+    if item_type:
+        stmt = stmt.where(InventoryTxn.item_type == item_type)
+    txns = db.scalars(stmt.order_by(InventoryTxn.created_at.desc(), InventoryTxn.id.desc()).limit(limit)).all()
+    material_ids = [txn.item_id for txn in txns if txn.item_type == "material"]
+    product_ids = [txn.item_id for txn in txns if txn.item_type == "finished"]
+    materials = {
+        item.id: item.name
+        for item in db.scalars(select(Material).where(Material.tenant_id == user.tenant_id, Material.id.in_(material_ids))).all()
+    } if material_ids else {}
+    products = {
+        item.id: item.name
+        for item in db.scalars(select(Product).where(Product.tenant_id == user.tenant_id, Product.id.in_(product_ids))).all()
+    } if product_ids else {}
+    rows = []
+    for txn in txns:
+        item_name = materials.get(txn.item_id) if txn.item_type == "material" else products.get(txn.item_id)
+        rows.append(model_dict(txn, {"item_name": item_name or "-"}))
+    return rows
+
+
 @router.get("/finished-goods")
 def list_finished_goods(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.execute(
@@ -314,8 +344,11 @@ def create_work_order(payload: WorkOrderIn, user: User = Depends(require_admin),
     flow = data.pop("flow")
     material_totals: dict[int, float] = {}
     for item in materials:
-        material_id = int(item["material_id"])
-        qty = float(item["quantity"])
+        try:
+            material_id = int(item["material_id"])
+            qty = float(item["quantity"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="扣料数据格式错误") from exc
         if qty <= 0:
             raise HTTPException(status_code=400, detail="扣料数量必须大于 0")
         material_totals[material_id] = material_totals.get(material_id, 0) + qty
@@ -355,6 +388,10 @@ def create_piece_entry(payload: PieceEntryIn, user: User = Depends(get_current_u
     emp = db.get(Employee, payload.employee_id)
     if not order or not emp or emp.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="工单或员工不存在")
+    if not emp.active:
+        raise HTTPException(status_code=400, detail="员工已停用，不能录入计件")
+    if order.status == "已完成":
+        raise HTTPException(status_code=400, detail="工单已完工，不能继续录入")
     flow = json.loads(order.flow or "[]")
     process = next((x for x in flow if x.get("name") == payload.process_name), None)
     if flow and not process:
@@ -382,6 +419,39 @@ def create_piece_entry(payload: PieceEntryIn, user: User = Depends(get_current_u
     db.commit()
     db.refresh(obj)
     return model_dict(obj, {"employee_name": emp.name, "order_no": order.order_no})
+
+
+@router.get("/wages/summary")
+def wage_summary(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    stmt = (
+        select(Employee.id, Employee.name, func.sum(PieceEntry.quantity), func.sum(PieceEntry.wage))
+        .join(Employee, Employee.id == PieceEntry.employee_id)
+        .where(PieceEntry.tenant_id == user.tenant_id)
+        .group_by(Employee.id, Employee.name)
+        .order_by(func.sum(PieceEntry.wage).desc())
+    )
+    if start_date:
+        stmt = stmt.where(PieceEntry.entry_date >= start_date)
+    if end_date:
+        stmt = stmt.where(PieceEntry.entry_date <= end_date)
+    rows = db.execute(stmt).all()
+    total_quantity = sum(quantity or 0 for _, _, quantity, _ in rows)
+    total_wage = sum(wage or 0 for _, _, _, wage in rows)
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_quantity": total_quantity,
+        "total_wage": total_wage,
+        "rows": [
+            {"employee_id": employee_id, "employee_name": name, "quantity": quantity or 0, "wage": wage or 0}
+            for employee_id, name, quantity, wage in rows
+        ],
+    }
 
 
 @router.get("/dashboard")

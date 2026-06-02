@@ -1,7 +1,7 @@
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class LoginIn(BaseModel):
@@ -23,49 +23,54 @@ class EmployeeIn(BaseModel):
     name: str
     employee_no: str
     position: str
-    piece_rate: float = 0
+    piece_rate: float = Field(default=0, ge=0)
     active: bool = True
 
 
 class ProcessIn(BaseModel):
     name: str
-    default_price: float = 0
+    default_price: float = Field(default=0, ge=0)
+    sort_order: int | None = Field(default=None, ge=0)
+
+
+class ProcessReorderIn(BaseModel):
+    process_ids: list[int] = Field(min_length=1)
 
 
 class ProductIn(BaseModel):
     name: str
     spec: str = ""
     unit: str = "件"
-    default_flow: list[dict[str, Any]] = []
+    default_flow: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MaterialIn(BaseModel):
     name: str
     unit: str = "kg"
-    stock: float = 0
-    min_stock: float = 0
+    stock: float = Field(default=0, ge=0)
+    min_stock: float = Field(default=0, ge=0)
 
 
 class MaterialTxnIn(BaseModel):
     material_id: int
-    direction: str
-    quantity: float
+    direction: Literal["in", "out"]
+    quantity: float = Field(gt=0)
     reason: str = ""
 
 
 class FinishedTxnIn(BaseModel):
     product_id: int
-    direction: str
-    quantity: float
+    direction: Literal["in", "out"]
+    quantity: float = Field(gt=0)
     reason: str = ""
 
 
 class WorkOrderIn(BaseModel):
     order_no: str
     product_id: int
-    quantity: float
+    quantity: float = Field(gt=0)
     flow: list[dict[str, Any]]
-    materials: list[dict[str, Any]] = []
+    materials: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PieceEntryIn(BaseModel):
@@ -73,7 +78,17 @@ class PieceEntryIn(BaseModel):
     order_no: str
     process_name: str
     employee_id: int
-    quantity: float
+    quantity: float = Field(gt=0)
+
+
+class InventoryTxnQuery(BaseModel):
+    item_type: Literal["material", "finished"] | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class WageSummaryQuery(BaseModel):
+    start_date: date | None = None
+    end_date: date | None = None
 
 
 class BootstrapOut(BaseModel):

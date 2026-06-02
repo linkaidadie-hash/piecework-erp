@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     access_token_expire_minutes: int = 60 * 12
     default_domain: str = "erp.hanshuniu.top"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     license_file: str = "license.dat"
     license_public_key: str = """-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA9eEY4gJTL7pjCRwIf6DqRDn8EL6V9rD6EwemfCocOko=

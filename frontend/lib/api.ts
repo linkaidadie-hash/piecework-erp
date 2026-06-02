@@ -6,6 +6,13 @@ export type Session = {
   role: string;
 };
 
+export type LicenseStatus = {
+  machineId: string;
+  valid: boolean;
+  message: string;
+  license?: Record<string, any> | null;
+};
+
 export async function api<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,

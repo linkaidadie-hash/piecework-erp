@@ -21,6 +21,7 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-piecework}:${POSTGRES_PASSWORD:-change-strong-password}@db:5432/${POSTGRES_DB:-piecework_erp}
       SECRET_KEY: ${SECRET_KEY:-change-a-long-random-secret}
       DEFAULT_DOMAIN: ${DOMAIN:-erp.hanshuniu.top}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://${DOMAIN:-erp.hanshuniu.top}}
     depends_on:
       db:
         condition: service_healthy
