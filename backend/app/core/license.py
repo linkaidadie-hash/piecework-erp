@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import logging
 import os
 import platform
 import re
@@ -15,13 +16,16 @@ from typing import Any
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 
-from app.core.config import settings
+from app.core.config import TRUSTED_LICENSE_KEYS, settings
 
+
+log = logging.getLogger("license")
 
 VENDOR_ID = "yinmi"
 PRODUCT_ID = "sme-production-system"
 PRODUCT_NAME = "中小企业生产系统"
 SIGNED_FIELDS = (
+    "kid",
     "vendorId",
     "productId",
     "productName",
@@ -34,6 +38,13 @@ SIGNED_FIELDS = (
     "issuedAt",
 )
 MIN_FEATURE_MATCHES = 3
+
+# P0 2026-07-23: 旧 kid 显式拒绝 (旧私钥已公开泄露)
+# 任何带以下 kid 的 license 视作伪造, 一律拒绝
+DEPRECATED_KIDS: set[str] = {
+    # 历史 kid: 旧 keypair (仓库内含其私钥, 2026-07-23 公开泄露, 永久作废)
+    "ed25519-2026-05-20",
+}
 
 
 def _run(command: list[str]) -> str:
@@ -123,6 +134,27 @@ def canonical_license_payload(license_data: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
+def _resolve_public_key(license_data: dict[str, Any]) -> tuple[bool, str, Any]:
+    """
+    选公钥: 优先按 license_data.kid 查 TRUSTED_LICENSE_KEYS;
+    缺 kid 时兜底用 settings.license_public_key (兼容早期 license).
+    返回 (ok, error_msg_or_kid, public_key_object).
+    """
+    kid = license_data.get("kid")
+    if kid:
+        if kid in DEPRECATED_KIDS:
+            return False, f"授权使用了已泄露的密钥 (kid={kid}), 请向销售方重新申请", None
+        if kid in TRUSTED_LICENSE_KEYS:
+            try:
+                pub = serialization.load_pem_public_key(TRUSTED_LICENSE_KEYS[kid].encode("utf-8"))
+                return True, kid, pub
+            except Exception as e:
+                return False, f"授权公钥配置错误 (kid={kid}): {e}", None
+        return False, f"授权使用了未识别的密钥版本 (kid={kid})", None
+    # 无 kid 兜底: 旧 license 视作 deprecated (kid 缺失 = 旧 keypair)
+    return False, "授权缺少 kid 字段 (旧版 license 已停用, 请向销售方重新申请)", None
+
+
 def verify_license_data(license_data: dict[str, Any]) -> tuple[bool, str]:
     license_data.setdefault("vendorId", VENDOR_ID)
     license_data.setdefault("productId", PRODUCT_ID)
@@ -130,12 +162,19 @@ def verify_license_data(license_data: dict[str, Any]) -> tuple[bool, str]:
     signature = license_data.get("signature")
     if not isinstance(signature, str):
         return False, "授权文件缺少签名"
+
+    ok, info, public_key = _resolve_public_key(license_data)
+    if not ok:
+        log.warning("license rejected: %s", info)
+        return False, info
+
     try:
-        public_key = serialization.load_pem_public_key(settings.license_public_key.encode("utf-8"))
         public_key.verify(base64.b64decode(signature), canonical_license_payload(license_data))
     except (InvalidSignature, ValueError):
+        log.warning("license signature invalid (kid=%s)", info)
         return False, "授权文件签名无效"
-    except Exception:
+    except Exception as e:
+        log.error("license public key config error: %s", e)
         return False, "授权公钥配置错误"
 
     if license_data.get("vendorId") != VENDOR_ID or license_data.get("productId") != PRODUCT_ID:
@@ -161,6 +200,8 @@ def verify_license_data(license_data: dict[str, Any]) -> tuple[bool, str]:
             return False, "授权文件不属于本机"
     elif licensed_machine != current_machine:
         return False, "授权文件不属于本机"
+
+    log.info("license ok (kid=%s)", info)
     return True, "授权有效"
 
 
