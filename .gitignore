@@ -1,9 +1,51 @@
+# 运行时产物
 .env
 *.db
 __pycache__/
 .venv/
+venv/
 node_modules/
 .next/
 dist/
 build/
 *.log
+
+# P0 2026-07-23: 私钥 / 证书 / 签发产物 (绝不入仓)
+*.pem
+*.key
+*.pub
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_dsa
+id_dsa.*
+known_hosts
+license.dat
+license-*.dat
+*.license
+signing_key*
+secrets.env
+vault/
+
+# 客户 / 业务数据 (绝不入仓)
+data/customers/
+data/exports/
+*.sqlite
+*.sqlite3
+*.bak
+
+# 编辑器 / 临时
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.tmp
+*.bak
+
+# 预提交扫描器 (本地工具, 不入仓)
+.gitleaks.toml
+detect-secrets/
